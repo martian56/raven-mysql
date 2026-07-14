@@ -145,3 +145,100 @@ fun test_e2e_connection_recovers_after_sql_error() {
     assert_eq_str(result.rows[0].get(0), "42")
     conn.close()
 }
+
+fun test_e2e_insert_id_and_affected_rows() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let _ = must(conn.execute("DROP TABLE IF EXISTS raven_mysql_counts"))
+    let _ = must(
+        conn.execute(
+            "CREATE TABLE raven_mysql_counts (id BIGINT PRIMARY KEY AUTO_INCREMENT, value VARCHAR(30) NOT NULL)",
+        ),
+    )
+    let inserted = must(
+        conn.query("INSERT INTO raven_mysql_counts (value) VALUES ('one'), ('two')"),
+    )
+    assert_eq_int(inserted.affected, 2)
+    assert_eq_int(inserted.last_insert_id, 1)
+    assert_eq_int(must(conn.execute("UPDATE raven_mysql_counts SET value = UPPER(value)")), 2)
+    assert_eq_int(must(conn.execute("DELETE FROM raven_mysql_counts WHERE id = 2")), 1)
+    assert_eq_str(must(conn.query("SELECT COUNT(*) FROM raven_mysql_counts")).rows[0].get(0), "1")
+    let _ = must(conn.execute("DROP TABLE raven_mysql_counts"))
+    conn.close()
+}
+
+fun test_e2e_transaction_rollback() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let _ = must(conn.execute("DROP TABLE IF EXISTS raven_mysql_rollback"))
+    let _ = must(
+        conn.execute("CREATE TABLE raven_mysql_rollback (value INT NOT NULL) ENGINE=InnoDB"),
+    )
+    let _ = must(conn.execute("START TRANSACTION"))
+    let _ = must(conn.execute("INSERT INTO raven_mysql_rollback VALUES (1), (2)"))
+    let _ = must(conn.execute("ROLLBACK"))
+    assert_eq_str(must(conn.query("SELECT COUNT(*) FROM raven_mysql_rollback")).rows[0].get(0), "0")
+    let _ = must(conn.execute("DROP TABLE raven_mysql_rollback"))
+    conn.close()
+}
+
+fun test_e2e_transaction_commit() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let _ = must(conn.execute("DROP TABLE IF EXISTS raven_mysql_commit"))
+    let _ = must(conn.execute("CREATE TABLE raven_mysql_commit (value INT NOT NULL) ENGINE=InnoDB"))
+    let _ = must(conn.execute("START TRANSACTION"))
+    let _ = must(conn.execute("INSERT INTO raven_mysql_commit VALUES (7)"))
+    let _ = must(conn.execute("COMMIT"))
+    assert_eq_str(must(conn.query("SELECT value FROM raven_mysql_commit")).rows[0].get(0), "7")
+    let _ = must(conn.execute("DROP TABLE raven_mysql_commit"))
+    conn.close()
+}
+
+fun test_e2e_column_metadata_and_empty_result_set() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let _ = must(conn.execute("DROP TABLE IF EXISTS raven_mysql_metadata"))
+    let _ = must(
+        conn.execute(
+            "CREATE TABLE raven_mysql_metadata (id BIGINT PRIMARY KEY, label VARCHAR(40) NOT NULL)",
+        ),
+    )
+    let result = must(
+        conn.query("SELECT id AS item_id, label FROM raven_mysql_metadata WHERE 1 = 0"),
+    )
+    assert_eq_int(result.row_count(), 0)
+    assert_eq_int(result.columns.len(), 2)
+    assert_eq_str(result.columns[0], "item_id")
+    assert_eq_str(result.fields[0].table, "raven_mysql_metadata")
+    assert_eq_str(result.fields[0].database, get_env_or("RAVEN_MYSQL_DATABASE", "ravendb"))
+    assert_eq_int(result.fields[0].column_type, 8)
+    assert_eq_int(result.fields[1].column_type, 253)
+    let _ = must(conn.execute("DROP TABLE raven_mysql_metadata"))
+    conn.close()
+}
+
+fun test_e2e_scalar_types_are_returned_as_text() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let result = must(
+        conn.query(
+            "SELECT CAST(-42 AS SIGNED) AS signed_value, CAST(123.45 AS DECIMAL(8,2)) AS decimal_value, DATE('2026-07-14') AS date_value, TIME('12:34:56') AS time_value",
+        ),
+    )
+    assert_eq_str(result.rows[0].get(0), "-42")
+    assert_eq_str(result.rows[0].get(1), "123.45")
+    assert_eq_str(result.rows[0].get(2), "2026-07-14")
+    assert_eq_str(result.rows[0].get(3), "12:34:56")
+    conn.close()
+}
