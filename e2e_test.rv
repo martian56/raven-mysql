@@ -62,6 +62,67 @@ fun test_e2e_connect_and_server_metadata() {
     conn.close()
 }
 
+fun test_e2e_empty_password_authentication() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = must(
+        connect(
+            get_env_or("RAVEN_MYSQL_HOST", "127.0.0.1"),
+            mysql_port(),
+            "raven_empty",
+            "",
+            get_env_or("RAVEN_MYSQL_DATABASE", "ravendb"),
+        ),
+    )
+    assert_eq_str(must(conn.query("SELECT CURRENT_USER()")).rows[0].get(0), "raven_empty@%")
+    conn.close()
+}
+
+fun test_e2e_wrong_password_returns_mysql_error() {
+    if !e2e_enabled() {
+        return
+    }
+    match connect(
+        get_env_or("RAVEN_MYSQL_HOST", "127.0.0.1"),
+        mysql_port(),
+        get_env_or("RAVEN_MYSQL_USER", "raven"),
+        "definitely-wrong",
+        get_env_or("RAVEN_MYSQL_DATABASE", "ravendb"),
+    ) {
+        Ok(conn) -> {
+            conn.close()
+            assert_msg(false, "expected authentication to fail")
+        },
+        Err(e) -> {
+            assert_eq_str(e.kind(), "mysql")
+            assert_msg(e.message().contains("ERROR 1045"), e.message())
+        },
+    }
+}
+
+fun test_e2e_unknown_database_returns_mysql_error() {
+    if !e2e_enabled() {
+        return
+    }
+    match connect(
+        get_env_or("RAVEN_MYSQL_HOST", "127.0.0.1"),
+        mysql_port(),
+        get_env_or("RAVEN_MYSQL_USER", "raven"),
+        get_env_or("RAVEN_MYSQL_PASSWORD", "ravenpw"),
+        "raven_mysql_database_that_does_not_exist",
+    ) {
+        Ok(conn) -> {
+            conn.close()
+            assert_msg(false, "expected database selection to fail")
+        },
+        Err(e) -> assert_msg(
+            e.message().contains("ERROR 1044") || e.message().contains("ERROR 1049"),
+            e.message(),
+        ),
+    }
+}
+
 fun test_e2e_ping_and_database_selection() {
     if !e2e_enabled() {
         return

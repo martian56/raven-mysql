@@ -1,7 +1,7 @@
 import std/string
 import std/test { assert_eq_int, assert_eq_str, assert_msg }
 import "./protocol" { byte, int2_le, int4_le, lenenc_string }
-import "./lib" { bind_sql_params, parse_column, parse_handshake, parse_ok, parse_server_error, parse_text_row }
+import "./lib" { bind_sql_params, Handshake, handshake_response, parse_column, parse_handshake, parse_ok, parse_server_error, parse_text_row }
 
 fun handshake_fixture() -> String {
     let caps = 1 | 4 | 8 | 512 | 8192 | 32768 | 131072 | 524288
@@ -29,6 +29,23 @@ fun test_parse_server_handshake() {
             assert_eq_str(handshake.plugin, "mysql_native_password")
         },
         Err(e) -> assert_msg(false, e.message()),
+    }
+}
+
+fun test_unsupported_authentication_plugin_is_explicit() {
+    let handshake = Handshake {
+        capabilities: 1 | 4 | 512 | 8192 | 32768 | 131072 | 524288,
+        scramble: "12345678901234567890",
+        plugin: "caching_sha2_password",
+        server_version: "8.0.43",
+        connection_id: 1,
+    }
+    match handshake_response(handshake, "raven", "secret", "ravendb") {
+        Ok(response) -> assert_msg(false, "expected unsupported plugin to fail"),
+        Err(e) -> assert_eq_str(
+            e.message(),
+            "unsupported authentication plugin: caching_sha2_password",
+        ),
     }
 }
 
