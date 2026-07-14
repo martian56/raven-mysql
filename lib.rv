@@ -1,5 +1,235 @@
 // raven-mysql: a MySQL client written in pure Raven.
 //
-// The implementation speaks the MySQL client/server protocol over std/net and
-// has no native dependencies. The public connection and query API will live in
-// this module.
+// It speaks the MySQL client/server protocol directly over std/net. The first
+// release supports mysql_native_password authentication, text-protocol SQL,
+// and result rows represented as strings with explicit SQL NULL tracking.
+
+import std/net
+import std/net { TcpStream }
+import std/string
+import std/error { error_kind }
+import "./protocol" { byte, byte_at, int4_le, native_password_token, read_int2_le, read_int4_le, read_packet, write_packet }
+
+const CLIENT_LONG_PASSWORD: Int = 1
+const CLIENT_LONG_FLAG: Int = 4
+const CLIENT_CONNECT_WITH_DB: Int = 8
+const CLIENT_PROTOCOL_41: Int = 512
+const CLIENT_TRANSACTIONS: Int = 8192
+const CLIENT_SECURE_CONNECTION: Int = 32768
+const CLIENT_MULTI_RESULTS: Int = 131072
+const CLIENT_PLUGIN_AUTH: Int = 524288
+const UTF8MB4_GENERAL_CI: Int = 45
+
+struct Connection {
+    stream: TcpStream,
+    server_version: String,
+    connection_id: Int,
+}
+
+struct Handshake {
+    capabilities: Int,
+    scramble: String,
+    plugin: String,
+    server_version: String,
+    connection_id: Int,
+}
+
+fun zeroes(count: Int) -> String {
+    let out = ""
+    let i = 0
+    while i < count {
+        out = out.concat(byte(0))
+        i = i + 1
+    }
+    return out
+}
+
+fun cstr(value: String) -> String {
+    return value.concat(byte(0))
+}
+
+fun find_nul(data: String, start: Int) -> Int {
+    let i = start
+    while i < data.length() {
+        if byte_at(data, i) == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return data.length()
+}
+
+fun strip_trailing_nul(data: String) -> String {
+    if data.length() > 0 && byte_at(data, data.length() - 1) == 0 {
+        return data.substring(0, data.length() - 1)
+    }
+    return data
+}
+
+fun parse_server_error(payload: String) -> Error {
+    if payload.length() < 3 {
+        return error_kind("mysql", "malformed error packet")
+    }
+    let code = read_int2_le(payload, 1)
+    let state = "HY000"
+    let message_offset = 3
+    if payload.length() >= 9 && byte_at(payload, 3) == 35 {
+        state = payload.substring(4, 9)
+        message_offset = 9
+    }
+    let message = payload.substring(message_offset, payload.length())
+    return error_kind("mysql", "ERROR ${code} (${state}): ${message}")
+}
+
+fun parse_handshake(payload: String) -> Result<Handshake, Error> {
+    if payload.length() < 34 || byte_at(payload, 0) != 10 {
+        return Err(error_kind("mysql", "unsupported or malformed server handshake"))
+    }
+
+    let version_end = find_nul(payload, 1)
+    if version_end + 31 > payload.length() {
+        return Err(error_kind("mysql", "truncated server handshake"))
+    }
+
+    let server_version = payload.substring(1, version_end)
+    let offset = version_end + 1
+    let connection_id = read_int4_le(payload, offset)
+    let scramble_first = payload.substring(offset + 4, offset + 12)
+    let capability_low = read_int2_le(payload, offset + 13)
+    let capability_high = read_int2_le(payload, offset + 18)
+    let capabilities = capability_low | (capability_high << 16)
+    let auth_length = byte_at(payload, offset + 20)
+    let variable_offset = offset + 31
+
+    let second_length = auth_length - 8
+    if second_length < 13 {
+        second_length = 13
+    }
+    if variable_offset + second_length > payload.length() {
+        second_length = payload.length() - variable_offset
+    }
+    let scramble_second = strip_trailing_nul(
+        payload.substring(variable_offset, variable_offset + second_length),
+    )
+    let scramble = scramble_first.concat(scramble_second)
+    if auth_length > 0 && scramble.length() >= auth_length {
+        scramble = scramble.substring(0, auth_length - 1)
+    }
+
+    let plugin_offset = variable_offset + second_length
+    let plugin = "mysql_native_password"
+    if plugin_offset < payload.length() {
+        let plugin_end = find_nul(payload, plugin_offset)
+        plugin = payload.substring(plugin_offset, plugin_end)
+    }
+
+    return Ok(Handshake { capabilities, scramble, plugin, server_version, connection_id })
+}
+
+fun client_capabilities(database: String) -> Int {
+    let caps = CLIENT_LONG_PASSWORD | CLIENT_LONG_FLAG | CLIENT_PROTOCOL_41 | CLIENT_TRANSACTIONS | CLIENT_SECURE_CONNECTION | CLIENT_MULTI_RESULTS | CLIENT_PLUGIN_AUTH
+    if database.length() > 0 {
+        caps = caps | CLIENT_CONNECT_WITH_DB
+    }
+    return caps
+}
+
+fun handshake_response(
+    handshake: Handshake,
+    user: String,
+    password: String,
+    database: String,
+) -> Result<String, Error> {
+    if handshake.plugin != "" && handshake.plugin != "mysql_native_password" {
+        return Err(error_kind("mysql", "unsupported authentication plugin: ${handshake.plugin}"))
+    }
+
+    let required = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH
+    if handshake.capabilities & required != required {
+        return Err(
+            error_kind("mysql", "server does not support the required 4.1 protocol capabilities"),
+        )
+    }
+
+    let caps = client_capabilities(database) & handshake.capabilities
+    let token = native_password_token(password, handshake.scramble)
+    let response = int4_le(caps).concat(int4_le(16777216))
+    response = response.concat(byte(UTF8MB4_GENERAL_CI)).concat(zeroes(23))
+    response = response.concat(cstr(user))
+    response = response.concat(byte(token.length())).concat(token)
+    if database.length() > 0 {
+        response = response.concat(cstr(database))
+    }
+    response = response.concat(cstr("mysql_native_password"))
+    return Ok(response)
+}
+
+fun finish_authentication(
+    stream: TcpStream,
+    packet_payload: String,
+    sequence: Int,
+    password: String,
+) -> Result<Bool, Error> {
+    if packet_payload.length() == 0 {
+        return Err(error_kind("mysql", "empty authentication response"))
+    }
+    let marker = byte_at(packet_payload, 0)
+    if marker == 0 {
+        return Ok(true)
+    }
+    if marker == 255 {
+        return Err(parse_server_error(packet_payload))
+    }
+    if marker == 254 {
+        let plugin_end = find_nul(packet_payload, 1)
+        let plugin = packet_payload.substring(1, plugin_end)
+        if plugin != "mysql_native_password" {
+            return Err(error_kind("mysql", "unsupported authentication plugin: ${plugin}"))
+        }
+        let scramble = strip_trailing_nul(
+            packet_payload.substring(plugin_end + 1, packet_payload.length()),
+        )
+        let _ = write_packet(stream, native_password_token(password, scramble), sequence + 1)?
+        let final_packet = read_packet(stream)?
+        if final_packet.payload.length() > 0 && byte_at(final_packet.payload, 0) == 0 {
+            return Ok(true)
+        }
+        if final_packet.payload.length() > 0 && byte_at(final_packet.payload, 0) == 255 {
+            return Err(parse_server_error(final_packet.payload))
+        }
+        return Err(error_kind("mysql", "unexpected response after authentication switch"))
+    }
+    return Err(error_kind("mysql", "unexpected authentication response ${marker}"))
+}
+
+// Connect to a MySQL server using mysql_native_password authentication.
+fun connect(
+    host: String,
+    port: Int,
+    user: String,
+    password: String,
+    database: String,
+) -> Result<Connection, Error> {
+    let stream = net.connect("${host}:${port}")?
+    let greeting = read_packet(stream)?
+    let handshake = parse_handshake(greeting.payload)?
+    let response = handshake_response(handshake, user, password, database)?
+    let _ = write_packet(stream, response, 1)?
+    let auth = read_packet(stream)?
+    finish_authentication(stream, auth.payload, auth.sequence, password)?
+    return Ok(
+        Connection {
+            stream,
+            server_version: handshake.server_version,
+            connection_id: handshake.connection_id,
+        },
+    )
+}
+
+impl Connection {
+    // Send COM_QUIT and close the socket. Best effort.
+    fun close(self) {
+        let _ = write_packet(self.stream, byte(1), 0)
+        self.stream.close()
+    }
+}

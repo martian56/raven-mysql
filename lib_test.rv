@@ -1,0 +1,40 @@
+import std/string
+import std/test { assert_eq_int, assert_eq_str, assert_msg }
+import "./protocol" { byte, int2_le, int4_le }
+import "./lib" { parse_handshake, parse_server_error }
+
+fun handshake_fixture() -> String {
+    let caps = 1 | 4 | 8 | 512 | 8192 | 32768 | 131072 | 524288
+    let payload = byte(10).concat("8.0.43").concat(byte(0))
+    payload = payload.concat(int4_le(1234))
+    payload = payload.concat("12345678").concat(byte(0))
+    payload = payload.concat(int2_le(caps & 65535))
+    payload = payload.concat(byte(45)).concat(int2_le(2))
+    payload = payload.concat(int2_le(caps >> 16)).concat(byte(21))
+    let i = 0
+    while i < 10 {
+        payload = payload.concat(byte(0))
+        i = i + 1
+    }
+    payload = payload.concat("abcdefghijklm").concat("mysql_native_password").concat(byte(0))
+    return payload
+}
+
+fun test_parse_server_handshake() {
+    match parse_handshake(handshake_fixture()) {
+        Ok(handshake) -> {
+            assert_eq_str(handshake.server_version, "8.0.43")
+            assert_eq_int(handshake.connection_id, 1234)
+            assert_eq_str(handshake.scramble, "12345678abcdefghijkl")
+            assert_eq_str(handshake.plugin, "mysql_native_password")
+        },
+        Err(e) -> assert_msg(false, e.message()),
+    }
+}
+
+fun test_parse_protocol_41_error() {
+    let payload = byte(255).concat(int2_le(1045)).concat("#28000Access denied")
+    let err = parse_server_error(payload)
+    assert_eq_str(err.kind(), "mysql")
+    assert_eq_str(err.message(), "ERROR 1045 (28000): Access denied")
+}
