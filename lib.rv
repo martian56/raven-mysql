@@ -3,4 +3,3 @@
 // The implementation speaks the MySQL client/server protocol over std/net and
 // has no native dependencies. The public connection and query API will live in
 // this module.
-
