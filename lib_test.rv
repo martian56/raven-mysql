@@ -104,6 +104,18 @@ fun test_parse_ok_packet_metadata() {
     }
 }
 
+fun test_malformed_length_encoded_values_return_errors() {
+    match parse_ok(byte(0).concat(byte(252))) {
+        Ok(result) -> assert_msg(false, "expected truncated OK packet to fail"),
+        Err(e) -> assert_eq_str(e.message(), "truncated length-encoded integer"),
+    }
+
+    match parse_text_row(byte(253).concat(byte(1)), 1) {
+        Ok(row) -> assert_msg(false, "expected truncated row to fail"),
+        Err(e) -> assert_eq_str(e.message(), "truncated length-encoded integer"),
+    }
+}
+
 fun bind_or_fail(sql: String, params: List<Option<String>>) -> String {
     return match bind_sql_params(sql, params) {
         Ok(bound) -> bound,

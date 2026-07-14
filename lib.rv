@@ -8,7 +8,7 @@ import std/net
 import std/net { TcpStream }
 import std/string
 import std/error { error_kind }
-import "./protocol" { byte, byte_at, hex, int4_le, native_password_token, read_int2_le, read_int4_le, read_lenenc, read_packet, write_packet }
+import "./protocol" { byte, byte_at, hex, int4_le, LenEnc, native_password_token, read_int2_le, read_int4_le, read_lenenc, read_packet, write_packet }
 
 const CLIENT_LONG_PASSWORD: Int = 1
 const CLIENT_LONG_FLAG: Int = 4
@@ -223,11 +223,33 @@ fun parse_server_error(payload: String) -> Error {
     return error_kind("mysql", "ERROR ${code} (${state}): ${message}")
 }
 
+fun read_lenenc_checked(payload: String, offset: Int) -> Result<LenEnc, Error> {
+    if offset < 0 || offset >= payload.length() {
+        return Err(error_kind("mysql", "truncated length-encoded integer"))
+    }
+    let marker = byte_at(payload, offset)
+    let required = 1
+    if marker == 252 {
+        required = 3
+    } else if marker == 253 {
+        required = 4
+    } else if marker >= 254 {
+        required = 9
+    }
+    if offset + required > payload.length() {
+        return Err(error_kind("mysql", "truncated length-encoded integer"))
+    }
+    if marker == 255 {
+        return Err(error_kind("mysql", "invalid length-encoded integer marker"))
+    }
+    return Ok(read_lenenc(payload, offset))
+}
+
 fun lenenc_string_at(payload: String, offset: Int) -> Result<String, Error> {
     if offset >= payload.length() {
         return Err(error_kind("mysql", "truncated length-encoded string"))
     }
-    let length = read_lenenc(payload, offset)
+    let length = read_lenenc_checked(payload, offset)?
     if length.is_null || length.next + length.value > payload.length() {
         return Err(error_kind("mysql", "malformed length-encoded string"))
     }
@@ -238,7 +260,7 @@ fun skip_lenenc_string(payload: String, offset: Int) -> Result<Int, Error> {
     if offset >= payload.length() {
         return Err(error_kind("mysql", "truncated column definition"))
     }
-    let length = read_lenenc(payload, offset)
+    let length = read_lenenc_checked(payload, offset)?
     if length.is_null || length.next + length.value > payload.length() {
         return Err(error_kind("mysql", "malformed column definition"))
     }
@@ -261,7 +283,7 @@ fun parse_column(payload: String) -> Result<Column, Error> {
     if offset >= payload.length() {
         return Err(error_kind("mysql", "truncated column definition metadata"))
     }
-    let fixed = read_lenenc(payload, offset)
+    let fixed = read_lenenc_checked(payload, offset)?
     offset = fixed.next
     if fixed.value < 12 || offset + fixed.value > payload.length() {
         return Err(error_kind("mysql", "malformed column definition metadata"))
@@ -281,7 +303,7 @@ fun parse_text_row(payload: String, column_count: Int) -> Result<Row, Error> {
         if offset >= payload.length() {
             return Err(error_kind("mysql", "truncated result row"))
         }
-        let length = read_lenenc(payload, offset)
+        let length = read_lenenc_checked(payload, offset)?
         offset = length.next
         if length.is_null {
             values.push("")
@@ -313,8 +335,8 @@ fun parse_ok(payload: String) -> Result<QueryResult, Error> {
     if payload.length() == 0 || byte_at(payload, 0) != 0 {
         return Err(error_kind("mysql", "malformed OK packet"))
     }
-    let affected_value = read_lenenc(payload, 1)
-    let insert_value = read_lenenc(payload, affected_value.next)
+    let affected_value = read_lenenc_checked(payload, 1)?
+    let insert_value = read_lenenc_checked(payload, affected_value.next)?
     if insert_value.next + 4 > payload.length() {
         return Err(error_kind("mysql", "truncated OK packet"))
     }
@@ -352,7 +374,7 @@ fun read_query_response(stream: TcpStream) -> Result<QueryResult, Error> {
         return Err(error_kind("mysql", "LOCAL INFILE requests are not supported"))
     }
 
-    let count_value = read_lenenc(first.payload, 0)
+    let count_value = read_lenenc_checked(first.payload, 0)?
     if count_value.is_null || count_value.value < 1 {
         return Err(error_kind("mysql", "malformed result-set header"))
     }
