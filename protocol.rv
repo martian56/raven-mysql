@@ -295,13 +295,43 @@ fun native_password_token(password: String, scramble: String) -> String {
 
 fun hex(data: String) -> String {
     const DIGITS: String = "0123456789abcdef"
-    let out = ""
+    let chunks: List<String> = []
+    let chunk = ""
+    let chunk_bytes = 0
     let i = 0
     while i < data.length() {
         let value = byte_at(data, i)
-        out = out.concat(DIGITS.substring(value >> 4, (value >> 4) + 1))
-        out = out.concat(DIGITS.substring(value & 15, (value & 15) + 1))
+        chunk = chunk.concat(DIGITS.substring(value >> 4, (value >> 4) + 1))
+        chunk = chunk.concat(DIGITS.substring(value & 15, (value & 15) + 1))
+        chunk_bytes = chunk_bytes + 1
+        if chunk_bytes == 1024 {
+            chunks.push(chunk)
+            chunk = ""
+            chunk_bytes = 0
+        }
         i = i + 1
     }
-    return out
+    if chunk_bytes > 0 {
+        chunks.push(chunk)
+    }
+    if chunks.len() == 0 {
+        return ""
+    }
+
+    // Join chunks as a tree rather than repeatedly copying the entire prefix.
+    // This keeps large bound values near O(n log n) instead of O(n²).
+    while chunks.len() > 1 {
+        let merged: List<String> = []
+        i = 0
+        while i < chunks.len() {
+            if i + 1 < chunks.len() {
+                merged.push(chunks[i].concat(chunks[i + 1]))
+            } else {
+                merged.push(chunks[i])
+            }
+            i = i + 2
+        }
+        chunks = merged
+    }
+    return chunks[0]
 }
