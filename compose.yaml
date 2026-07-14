@@ -1,0 +1,24 @@
+services:
+  mysql:
+    image: mysql:8.0.43
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --local-infile=0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpw
+      MYSQL_DATABASE: ravendb
+      MYSQL_USER: raven
+      MYSQL_PASSWORD: ravenpw
+    ports:
+      - "${RAVEN_MYSQL_PORT:-33306}:3306"
+    volumes:
+      - ./docker/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpw"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+
