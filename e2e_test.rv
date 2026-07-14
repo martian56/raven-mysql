@@ -1,0 +1,147 @@
+import std/env { get_env_or, has_env }
+import std/string
+import std/test { assert_eq_int, assert_eq_str, assert_msg, assert_true }
+import "./lib" { connect, Connection }
+
+fun e2e_enabled() -> Bool {
+    return has_env("RAVEN_MYSQL_E2E")
+}
+
+fun mysql_port() -> Int {
+    return match get_env_or("RAVEN_MYSQL_PORT", "33306").parse_int() {
+        Some(port) -> port,
+        None -> 33306,
+    }
+}
+
+fun must<T>(result: Result<T, Error>) -> T {
+    return match result {
+        Ok(value) -> value,
+        Err(e) -> {
+            __panic(e.message())
+            must(result)
+        },
+    }
+}
+
+fun open_test_db() -> Connection {
+    return must(
+        connect(
+            get_env_or("RAVEN_MYSQL_HOST", "127.0.0.1"),
+            mysql_port(),
+            get_env_or("RAVEN_MYSQL_USER", "raven"),
+            get_env_or("RAVEN_MYSQL_PASSWORD", "ravenpw"),
+            get_env_or("RAVEN_MYSQL_DATABASE", "ravendb"),
+        ),
+    )
+}
+
+fun test_e2e_connect_and_server_metadata() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    assert_true(conn.server_version.length() > 0)
+    assert_true(conn.connection_id > 0)
+    let result = must(
+        conn.query("SELECT VERSION() AS version, DATABASE() AS db, CONNECTION_ID() AS id"),
+    )
+    assert_eq_int(result.row_count(), 1)
+    assert_eq_str(result.columns[0], "version")
+    assert_eq_str(result.columns[1], "db")
+    assert_eq_str(result.rows[0].get(1), get_env_or("RAVEN_MYSQL_DATABASE", "ravendb"))
+    assert_eq_str(result.rows[0].get(2), "${conn.connection_id}")
+    conn.close()
+}
+
+fun test_e2e_create_insert_and_select_rows() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let _ = must(conn.execute("DROP TABLE IF EXISTS raven_mysql_basic"))
+    let _ = must(
+        conn.execute(
+            "CREATE TABLE raven_mysql_basic (id BIGINT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(100), score DECIMAL(8,2))",
+        ),
+    )
+    assert_eq_int(
+        must(
+            conn.execute(
+                "INSERT INTO raven_mysql_basic (name, score) VALUES ('Ada', 9.50), ('Grace', 8.25), ('Linus', 7.00)",
+            ),
+        ),
+        3,
+    )
+    let result = must(conn.query("SELECT id, name, score FROM raven_mysql_basic ORDER BY id"))
+    assert_eq_int(result.row_count(), 3)
+    assert_eq_str(result.rows[0].get(0), "1")
+    assert_eq_str(result.rows[1].get(1), "Grace")
+    assert_eq_str(result.rows[2].get(2), "7.00")
+    let _ = must(conn.execute("DROP TABLE raven_mysql_basic"))
+    conn.close()
+}
+
+fun test_e2e_parameters_cannot_change_sql_syntax() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let _ = must(conn.execute("DROP TABLE IF EXISTS raven_mysql_params"))
+    let _ = must(conn.execute("CREATE TABLE raven_mysql_params (value TEXT NOT NULL)"))
+    let hostile = "O'Brien'); DROP TABLE raven_mysql_params; --"
+    assert_eq_int(
+        must(conn.execute_params("INSERT INTO raven_mysql_params VALUES (?)", [hostile])),
+        1,
+    )
+    let result = must(
+        conn.query_params("SELECT value FROM raven_mysql_params WHERE value = ?", [hostile]),
+    )
+    assert_eq_int(result.row_count(), 1)
+    assert_eq_str(result.rows[0].get(0), hostile)
+    assert_eq_int(must(conn.query("SELECT COUNT(*) FROM raven_mysql_params")).row_count(), 1)
+    let _ = must(conn.execute("DROP TABLE raven_mysql_params"))
+    conn.close()
+}
+
+fun test_e2e_null_and_empty_string_remain_distinct() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let _ = must(conn.execute("DROP TABLE IF EXISTS raven_mysql_nulls"))
+    let _ = must(
+        conn.execute(
+            "CREATE TABLE raven_mysql_nulls (nullable_value TEXT NULL, empty_value TEXT NOT NULL)",
+        ),
+    )
+    let params: List<Option<String>> = [None, Some("")]
+    assert_eq_int(
+        must(conn.execute_optional_params("INSERT INTO raven_mysql_nulls VALUES (?, ?)", params)),
+        1,
+    )
+    let result = must(conn.query("SELECT nullable_value, empty_value FROM raven_mysql_nulls"))
+    assert_true(result.rows[0].is_null(0))
+    assert_eq_str(result.rows[0].get(0), "")
+    assert_true(!result.rows[0].is_null(1))
+    assert_eq_str(result.rows[0].get(1), "")
+    let _ = must(conn.execute("DROP TABLE raven_mysql_nulls"))
+    conn.close()
+}
+
+fun test_e2e_connection_recovers_after_sql_error() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    match conn.query("SELECT * FROM raven_mysql_table_that_does_not_exist") {
+        Ok(result) -> assert_msg(false, "expected missing-table query to fail"),
+        Err(e) -> {
+            assert_eq_str(e.kind(), "mysql")
+            assert_true(e.message().contains("ERROR 1146"))
+        },
+    }
+    let result = must(conn.query("SELECT 42 AS answer"))
+    assert_eq_str(result.rows[0].get(0), "42")
+    conn.close()
+}
