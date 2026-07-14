@@ -62,6 +62,28 @@ fun test_e2e_connect_and_server_metadata() {
     conn.close()
 }
 
+fun test_e2e_ping_and_database_selection() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    assert_msg(must(conn.ping()), "initial COM_PING returned false")
+    assert_msg(
+        must(conn.select_database(get_env_or("RAVEN_MYSQL_DATABASE", "ravendb"))),
+        "COM_INIT_DB returned false",
+    )
+    assert_eq_str(must(conn.query("SELECT DATABASE()")).rows[0].get(0), "ravendb")
+    match conn.select_database("raven_mysql_database_that_does_not_exist") {
+        Ok(ok) -> assert_msg(false, "expected unknown database to fail"),
+        Err(e) -> assert_msg(
+            e.message().contains("ERROR 1044") || e.message().contains("ERROR 1049"),
+            e.message(),
+        ),
+    }
+    assert_msg(must(conn.ping()), "COM_PING after INIT_DB error returned false")
+    conn.close()
+}
+
 fun test_e2e_create_insert_and_select_rows() {
     if !e2e_enabled() {
         return

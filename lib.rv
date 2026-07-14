@@ -532,15 +532,12 @@ fun finish_authentication(
     return Err(error_kind("mysql", "unexpected authentication response ${marker}"))
 }
 
-// Connect to a MySQL server using mysql_native_password authentication.
-fun connect(
-    host: String,
-    port: Int,
+fun establish_connection(
+    stream: TcpStream,
     user: String,
     password: String,
     database: String,
 ) -> Result<Connection, Error> {
-    let stream = net.connect("${host}:${port}")?
     let greeting = read_packet(stream)?
     let handshake = parse_handshake(greeting.payload)?
     let response = handshake_response(handshake, user, password, database)?
@@ -556,7 +553,75 @@ fun connect(
     )
 }
 
+// Connect with a read/write timeout for authentication and later commands.
+// A non-positive timeout restores blocking socket behavior.
+fun connect_with_timeout(
+    host: String,
+    port: Int,
+    user: String,
+    password: String,
+    database: String,
+    timeout_ms: Int,
+) -> Result<Connection, Error> {
+    let stream = net.connect("${host}:${port}")?
+    stream.set_read_timeout_ms(timeout_ms)
+    stream.set_write_timeout_ms(timeout_ms)
+    return match establish_connection(stream, user, password, database) {
+        Ok(connection) -> Ok(connection),
+        Err(e) -> {
+            stream.close()
+            Err(e)
+        },
+    }
+}
+
+// Connect to a MySQL server using mysql_native_password authentication and a
+// 30-second socket timeout.
+fun connect(
+    host: String,
+    port: Int,
+    user: String,
+    password: String,
+    database: String,
+) -> Result<Connection, Error> {
+    return connect_with_timeout(host, port, user, password, database, 30000)
+}
+
+fun read_simple_command_response(stream: TcpStream, command_name: String) -> Result<Bool, Error> {
+    let packet = read_packet(stream)?
+    if packet.payload.length() == 0 {
+        return Err(error_kind("mysql", "empty ${command_name} response"))
+    }
+    let marker = byte_at(packet.payload, 0)
+    if marker == 0 {
+        let _ = parse_ok(packet.payload)?
+        return Ok(true)
+    }
+    if marker == 255 {
+        return Err(parse_server_error(packet.payload))
+    }
+    return Err(error_kind("mysql", "unexpected ${command_name} response ${marker}"))
+}
+
 impl Connection {
+    // Change the socket timeout used by subsequent reads and writes.
+    fun set_timeout_ms(self, timeout_ms: Int) {
+        self.stream.set_read_timeout_ms(timeout_ms)
+        self.stream.set_write_timeout_ms(timeout_ms)
+    }
+
+    // Ask the server to verify that this connection is alive.
+    fun ping(self) -> Result<Bool, Error> {
+        let _ = write_packet(self.stream, byte(14), 0)?
+        return read_simple_command_response(self.stream, "PING")
+    }
+
+    // Change the default database for this connection with COM_INIT_DB.
+    fun select_database(self, database: String) -> Result<Bool, Error> {
+        let _ = write_packet(self.stream, byte(2).concat(database), 0)?
+        return read_simple_command_response(self.stream, "INIT_DB")
+    }
+
     // Run SQL and collect either a result set or write metadata.
     fun query(self, sql: String) -> Result<QueryResult, Error> {
         let _ = write_packet(self.stream, byte(3).concat(sql), 0)?
