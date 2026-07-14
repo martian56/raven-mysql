@@ -79,7 +79,7 @@ fun is_sql_space(value: Int) -> Bool {
 }
 
 fun sql_text_literal(value: String) -> String {
-    return "CONVERT(X'${hex(value)}' USING utf8mb4)"
+    return "_utf8mb4 X'${hex(value)}'"
 }
 
 // Substitute only syntactic `?` placeholders. Question marks inside quoted

@@ -118,7 +118,7 @@ fun test_bind_sql_params_encodes_values_as_hex() {
     let params: List<Option<String>> = [Some("O'Brien"), Some("x; DROP TABLE users")]
     assert_eq_str(
         bind_or_fail("SELECT * FROM users WHERE name = ? AND note = ?", params),
-        "SELECT * FROM users WHERE name = CONVERT(X'4f27427269656e' USING utf8mb4) AND note = CONVERT(X'783b2044524f50205441424c45207573657273' USING utf8mb4)",
+        "SELECT * FROM users WHERE name = _utf8mb4 X'4f27427269656e' AND note = _utf8mb4 X'783b2044524f50205441424c45207573657273'",
     )
 }
 
@@ -127,7 +127,7 @@ fun test_bind_sql_params_skips_quotes_identifiers_and_comments() {
     let sql = "SELECT '?', \"?\", `?` /* ? */ -- ?\n# ?\nWHERE value = ?"
     assert_eq_str(
         bind_or_fail(sql, params),
-        "SELECT '?', \"?\", `?` /* ? */ -- ?\n# ?\nWHERE value = CONVERT(X'7265616c' USING utf8mb4)",
+        "SELECT '?', \"?\", `?` /* ? */ -- ?\n# ?\nWHERE value = _utf8mb4 X'7265616c'",
     )
 }
 
@@ -135,7 +135,7 @@ fun test_bind_sql_params_supports_null() {
     let params: List<Option<String>> = [None, Some("")]
     assert_eq_str(
         bind_or_fail("INSERT INTO t VALUES (?, ?)", params),
-        "INSERT INTO t VALUES (NULL, CONVERT(X'' USING utf8mb4))",
+        "INSERT INTO t VALUES (NULL, _utf8mb4 X'')",
     )
 }
 
