@@ -127,11 +127,21 @@ fun read_exact(stream: TcpStream, count: Int) -> Result<String, Error> {
 fun read_packet(stream: TcpStream) -> Result<Packet, Error> {
     let payload = ""
     let sequence = 0
+    let expected_sequence = -1
     let more = true
     while more {
         let header = read_exact(stream, 4)?
         let length = read_int3_le(header, 0)
         sequence = byte_at(header, 3)
+        if expected_sequence >= 0 && sequence != expected_sequence {
+            return Err(
+                error_kind(
+                    "mysql",
+                    "packet sequence mismatch: expected ${expected_sequence}, received ${sequence}",
+                ),
+            )
+        }
+        expected_sequence = (sequence + 1) & 255
         if length > 0 {
             payload = payload.concat(read_exact(stream, length)?)
         }
