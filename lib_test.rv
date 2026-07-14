@@ -1,7 +1,7 @@
 import std/string
 import std/test { assert_eq_int, assert_eq_str, assert_msg }
 import "./protocol" { byte, int2_le, int4_le, lenenc_string }
-import "./lib" { parse_column, parse_handshake, parse_ok, parse_server_error, parse_text_row }
+import "./lib" { bind_sql_params, parse_column, parse_handshake, parse_ok, parse_server_error, parse_text_row }
 
 fun handshake_fixture() -> String {
     let caps = 1 | 4 | 8 | 512 | 8192 | 32768 | 131072 | 524288
@@ -101,5 +101,54 @@ fun test_parse_ok_packet_metadata() {
             assert_eq_int(result.warnings, 1)
         },
         Err(e) -> assert_msg(false, e.message()),
+    }
+}
+
+fun bind_or_fail(sql: String, params: List<Option<String>>) -> String {
+    return match bind_sql_params(sql, params) {
+        Ok(bound) -> bound,
+        Err(e) -> {
+            assert_msg(false, e.message())
+            ""
+        },
+    }
+}
+
+fun test_bind_sql_params_encodes_values_as_hex() {
+    let params: List<Option<String>> = [Some("O'Brien"), Some("x; DROP TABLE users")]
+    assert_eq_str(
+        bind_or_fail("SELECT * FROM users WHERE name = ? AND note = ?", params),
+        "SELECT * FROM users WHERE name = CONVERT(X'4f27427269656e' USING utf8mb4) AND note = CONVERT(X'783b2044524f50205441424c45207573657273' USING utf8mb4)",
+    )
+}
+
+fun test_bind_sql_params_skips_quotes_identifiers_and_comments() {
+    let params: List<Option<String>> = [Some("real")]
+    let sql = "SELECT '?', \"?\", `?` /* ? */ -- ?\n# ?\nWHERE value = ?"
+    assert_eq_str(
+        bind_or_fail(sql, params),
+        "SELECT '?', \"?\", `?` /* ? */ -- ?\n# ?\nWHERE value = CONVERT(X'7265616c' USING utf8mb4)",
+    )
+}
+
+fun test_bind_sql_params_supports_null() {
+    let params: List<Option<String>> = [None, Some("")]
+    assert_eq_str(
+        bind_or_fail("INSERT INTO t VALUES (?, ?)", params),
+        "INSERT INTO t VALUES (NULL, CONVERT(X'' USING utf8mb4))",
+    )
+}
+
+fun test_bind_sql_params_rejects_wrong_arity() {
+    let empty: List<Option<String>> = []
+    match bind_sql_params("SELECT ?", empty) {
+        Ok(sql) -> assert_msg(false, "expected too-few-parameters error"),
+        Err(e) -> assert_eq_str(e.message(), "not enough parameters for SQL placeholders"),
+    }
+
+    let one: List<Option<String>> = [Some("extra")]
+    match bind_sql_params("SELECT 1", one) {
+        Ok(sql) -> assert_msg(false, "expected too-many-parameters error"),
+        Err(e) -> assert_eq_str(e.message(), "too many parameters for SQL placeholders"),
     }
 }
