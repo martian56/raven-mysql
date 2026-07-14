@@ -36,6 +36,14 @@ fun open_test_db() -> Connection {
     )
 }
 
+fun repeated_text(value: String, target_length: Int) -> String {
+    let out = value
+    while out.length() < target_length {
+        out = out.concat(out)
+    }
+    return out.substring(0, target_length)
+}
+
 fun test_e2e_connect_and_server_metadata() {
     if !e2e_enabled() {
         return
@@ -240,5 +248,133 @@ fun test_e2e_scalar_types_are_returned_as_text() {
     assert_eq_str(result.rows[0].get(1), "123.45")
     assert_eq_str(result.rows[0].get(2), "2026-07-14")
     assert_eq_str(result.rows[0].get(3), "12:34:56")
+    conn.close()
+}
+
+fun test_e2e_unicode_and_control_bytes_round_trip() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let _ = must(conn.execute("DROP TABLE IF EXISTS raven_mysql_bytes"))
+    let _ = must(
+        conn.execute("CREATE TABLE raven_mysql_bytes (id INT PRIMARY KEY, value LONGTEXT NOT NULL)"),
+    )
+    let unicode = "Raven says salam: Bakı 🐦"
+    let with_nul = "before".concat(__str_from_byte(0)).concat("after")
+    let _ = must(conn.execute_params("INSERT INTO raven_mysql_bytes VALUES (1, ?)", [unicode]))
+    let _ = must(conn.execute_params("INSERT INTO raven_mysql_bytes VALUES (2, ?)", [with_nul]))
+    let result = must(conn.query("SELECT value FROM raven_mysql_bytes ORDER BY id"))
+    assert_eq_str(result.rows[0].get(0), unicode)
+    assert_eq_str(result.rows[1].get(0), with_nul)
+    let _ = must(conn.execute("DROP TABLE raven_mysql_bytes"))
+    conn.close()
+}
+
+fun test_e2e_large_parameter_and_result_round_trip() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let _ = must(conn.execute("DROP TABLE IF EXISTS raven_mysql_large"))
+    let _ = must(conn.execute("CREATE TABLE raven_mysql_large (value MEDIUMTEXT NOT NULL)"))
+    let value = repeated_text("raven-mysql-", 262144)
+    assert_eq_int(must(conn.execute_params("INSERT INTO raven_mysql_large VALUES (?)", [value])), 1)
+    let result = must(conn.query("SELECT value FROM raven_mysql_large"))
+    assert_eq_int(result.rows[0].get(0).length(), 262144)
+    assert_eq_str(result.rows[0].get(0), value)
+    let _ = must(conn.execute("DROP TABLE raven_mysql_large"))
+    conn.close()
+}
+
+fun test_e2e_many_rows_preserve_order_and_boundaries() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let _ = must(conn.execute("DROP TABLE IF EXISTS raven_mysql_many"))
+    let _ = must(
+        conn.execute(
+            "CREATE TABLE raven_mysql_many (id INT PRIMARY KEY, value VARCHAR(30) NOT NULL)",
+        ),
+    )
+    let sql = "INSERT INTO raven_mysql_many VALUES "
+    let i = 1
+    while i <= 200 {
+        if i > 1 {
+            sql = sql.concat(",")
+        }
+        sql = sql.concat("(${i}, 'row-${i}')")
+        i = i + 1
+    }
+    assert_eq_int(must(conn.execute(sql)), 200)
+    let result = must(conn.query("SELECT id, value FROM raven_mysql_many ORDER BY id"))
+    assert_eq_int(result.row_count(), 200)
+    assert_eq_str(result.rows[0].get(1), "row-1")
+    assert_eq_str(result.rows[99].get(1), "row-100")
+    assert_eq_str(result.rows[199].get(1), "row-200")
+    let _ = must(conn.execute("DROP TABLE raven_mysql_many"))
+    conn.close()
+}
+
+fun test_e2e_separate_connections_observe_committed_writes() {
+    if !e2e_enabled() {
+        return
+    }
+    let writer = open_test_db()
+    let reader = open_test_db()
+    let _ = must(writer.execute("DROP TABLE IF EXISTS raven_mysql_connections"))
+    let _ = must(
+        writer.execute("CREATE TABLE raven_mysql_connections (value VARCHAR(20) NOT NULL)"),
+    )
+    let _ = must(writer.execute("INSERT INTO raven_mysql_connections VALUES ('visible')"))
+    let result = must(reader.query("SELECT value FROM raven_mysql_connections"))
+    assert_eq_str(result.rows[0].get(0), "visible")
+    let _ = must(writer.execute("DROP TABLE raven_mysql_connections"))
+    reader.close()
+    writer.close()
+}
+
+fun test_e2e_bound_values_ignore_session_escape_mode() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let _ = must(conn.execute("DROP TABLE IF EXISTS raven_mysql_sql_mode"))
+    let _ = must(conn.execute("CREATE TABLE raven_mysql_sql_mode (value TEXT NOT NULL)"))
+    let _ = must(conn.execute("SET SESSION sql_mode = 'NO_BACKSLASH_ESCAPES'"))
+    let value = "backslash \\ and quote ' and question ?"
+    let _ = must(conn.execute_params("INSERT INTO raven_mysql_sql_mode VALUES (?)", [value]))
+    let result = must(
+        conn.query_params("SELECT value FROM raven_mysql_sql_mode WHERE value = ?", [value]),
+    )
+    assert_eq_str(result.rows[0].get(0), value)
+    let _ = must(conn.execute("DROP TABLE raven_mysql_sql_mode"))
+    conn.close()
+}
+
+fun test_e2e_server_warning_count_is_reported() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let result = must(conn.query("SELECT CAST('not-a-number' AS UNSIGNED) AS coerced"))
+    assert_eq_str(result.rows[0].get(0), "0")
+    assert_true(result.warnings > 0)
+    conn.close()
+}
+
+fun test_e2e_multi_packet_query_and_result() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let large_result = must(conn.query("SELECT REPEAT('z', 17000000) AS payload"))
+    assert_eq_int(large_result.rows[0].get(0).length(), 17000000)
+
+    let padding = repeated_text("x", 16777216)
+    let large_query = "SELECT 1 AS answer /*".concat(padding).concat("*/")
+    let result = must(conn.query(large_query))
+    assert_eq_str(result.rows[0].get(0), "1")
     conn.close()
 }
