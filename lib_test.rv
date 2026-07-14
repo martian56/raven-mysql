@@ -49,6 +49,23 @@ fun test_unsupported_authentication_plugin_is_explicit() {
     }
 }
 
+fun test_database_requires_handshake_capability() {
+    let handshake = Handshake {
+        capabilities: 1 | 4 | 512 | 8192 | 32768 | 524288,
+        scramble: "12345678901234567890",
+        plugin: "mysql_native_password",
+        server_version: "8.0.43",
+        connection_id: 1,
+    }
+    match handshake_response(handshake, "raven", "secret", "ravendb") {
+        Ok(response) -> assert_msg(false, "expected missing database capability to fail"),
+        Err(e) -> assert_eq_str(
+            e.message(),
+            "server does not support selecting a database during handshake",
+        ),
+    }
+}
+
 fun test_parse_protocol_41_error() {
     let payload = byte(255).concat(int2_le(1045)).concat("#28000Access denied")
     let err = parse_server_error(payload)

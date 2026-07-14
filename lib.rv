@@ -16,7 +16,6 @@ const CLIENT_CONNECT_WITH_DB: Int = 8
 const CLIENT_PROTOCOL_41: Int = 512
 const CLIENT_TRANSACTIONS: Int = 8192
 const CLIENT_SECURE_CONNECTION: Int = 32768
-const CLIENT_MULTI_RESULTS: Int = 131072
 const CLIENT_PLUGIN_AUTH: Int = 524288
 const UTF8MB4_GENERAL_CI: Int = 45
 
@@ -457,7 +456,7 @@ fun parse_handshake(payload: String) -> Result<Handshake, Error> {
 }
 
 fun client_capabilities(database: String) -> Int {
-    let caps = CLIENT_LONG_PASSWORD | CLIENT_LONG_FLAG | CLIENT_PROTOCOL_41 | CLIENT_TRANSACTIONS | CLIENT_SECURE_CONNECTION | CLIENT_MULTI_RESULTS | CLIENT_PLUGIN_AUTH
+    let caps = CLIENT_LONG_PASSWORD | CLIENT_LONG_FLAG | CLIENT_PROTOCOL_41 | CLIENT_TRANSACTIONS | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH
     if database.length() > 0 {
         caps = caps | CLIENT_CONNECT_WITH_DB
     }
@@ -479,6 +478,9 @@ fun handshake_response(
         return Err(
             error_kind("mysql", "server does not support the required 4.1 protocol capabilities"),
         )
+    }
+    if database.length() > 0 && handshake.capabilities & CLIENT_CONNECT_WITH_DB == 0 {
+        return Err(error_kind("mysql", "server does not support selecting a database during handshake"))
     }
 
     let caps = client_capabilities(database) & handshake.capabilities
