@@ -8,7 +8,7 @@ import std/net
 import std/net { TcpStream }
 import std/string
 import std/error { error_kind }
-import "./protocol" { byte, byte_at, int4_le, native_password_token, read_int2_le, read_int4_le, read_packet, write_packet }
+import "./protocol" { byte, byte_at, int4_le, native_password_token, read_int2_le, read_int4_le, read_lenenc, read_packet, write_packet }
 
 const CLIENT_LONG_PASSWORD: Int = 1
 const CLIENT_LONG_FLAG: Int = 4
@@ -24,6 +24,32 @@ struct Connection {
     stream: TcpStream,
     server_version: String,
     connection_id: Int,
+}
+
+// Metadata for one result-set column.
+struct Column {
+    name: String,
+    table: String,
+    database: String,
+    column_type: Int,
+    flags: Int,
+    charset: Int,
+}
+
+// A text-protocol row. SQL NULL has an empty value and a true null marker.
+struct Row {
+    values: List<String>,
+    nulls: List<Bool>,
+}
+
+// The complete response to one SQL statement.
+struct QueryResult {
+    columns: List<String>,
+    fields: List<Column>,
+    rows: List<Row>,
+    affected: Int,
+    last_insert_id: Int,
+    warnings: Int,
 }
 
 struct Handshake {
@@ -79,6 +105,172 @@ fun parse_server_error(payload: String) -> Error {
     }
     let message = payload.substring(message_offset, payload.length())
     return error_kind("mysql", "ERROR ${code} (${state}): ${message}")
+}
+
+fun lenenc_string_at(payload: String, offset: Int) -> Result<String, Error> {
+    if offset >= payload.length() {
+        return Err(error_kind("mysql", "truncated length-encoded string"))
+    }
+    let length = read_lenenc(payload, offset)
+    if length.is_null || length.next + length.value > payload.length() {
+        return Err(error_kind("mysql", "malformed length-encoded string"))
+    }
+    return Ok(payload.substring(length.next, length.next + length.value))
+}
+
+fun skip_lenenc_string(payload: String, offset: Int) -> Result<Int, Error> {
+    if offset >= payload.length() {
+        return Err(error_kind("mysql", "truncated column definition"))
+    }
+    let length = read_lenenc(payload, offset)
+    if length.is_null || length.next + length.value > payload.length() {
+        return Err(error_kind("mysql", "malformed column definition"))
+    }
+    return Ok(length.next + length.value)
+}
+
+fun parse_column(payload: String) -> Result<Column, Error> {
+    let offset = 0
+    let _catalog = lenenc_string_at(payload, offset)?
+    offset = skip_lenenc_string(payload, offset)?
+    let database = lenenc_string_at(payload, offset)?
+    offset = skip_lenenc_string(payload, offset)?
+    let table = lenenc_string_at(payload, offset)?
+    offset = skip_lenenc_string(payload, offset)?
+    offset = skip_lenenc_string(payload, offset)?
+    let name = lenenc_string_at(payload, offset)?
+    offset = skip_lenenc_string(payload, offset)?
+    offset = skip_lenenc_string(payload, offset)?
+
+    if offset >= payload.length() {
+        return Err(error_kind("mysql", "truncated column definition metadata"))
+    }
+    let fixed = read_lenenc(payload, offset)
+    offset = fixed.next
+    if fixed.value < 12 || offset + fixed.value > payload.length() {
+        return Err(error_kind("mysql", "malformed column definition metadata"))
+    }
+    let charset = read_int2_le(payload, offset)
+    let column_type = byte_at(payload, offset + 6)
+    let flags = read_int2_le(payload, offset + 7)
+    return Ok(Column { name, table, database, column_type, flags, charset })
+}
+
+fun parse_text_row(payload: String, column_count: Int) -> Result<Row, Error> {
+    let values: List<String> = []
+    let nulls: List<Bool> = []
+    let offset = 0
+    let i = 0
+    while i < column_count {
+        if offset >= payload.length() {
+            return Err(error_kind("mysql", "truncated result row"))
+        }
+        let length = read_lenenc(payload, offset)
+        offset = length.next
+        if length.is_null {
+            values.push("")
+            nulls.push(true)
+        } else {
+            if offset + length.value > payload.length() {
+                return Err(error_kind("mysql", "malformed result row"))
+            }
+            values.push(payload.substring(offset, offset + length.value))
+            nulls.push(false)
+            offset = offset + length.value
+        }
+        i = i + 1
+    }
+    if offset != payload.length() {
+        return Err(error_kind("mysql", "result row has trailing data"))
+    }
+    return Ok(Row { values, nulls })
+}
+
+fun empty_result() -> QueryResult {
+    let columns: List<String> = []
+    let fields: List<Column> = []
+    let rows: List<Row> = []
+    return QueryResult { columns, fields, rows, affected: 0, last_insert_id: 0, warnings: 0 }
+}
+
+fun parse_ok(payload: String) -> Result<QueryResult, Error> {
+    if payload.length() == 0 || byte_at(payload, 0) != 0 {
+        return Err(error_kind("mysql", "malformed OK packet"))
+    }
+    let affected_value = read_lenenc(payload, 1)
+    let insert_value = read_lenenc(payload, affected_value.next)
+    if insert_value.next + 4 > payload.length() {
+        return Err(error_kind("mysql", "truncated OK packet"))
+    }
+    let result = empty_result()
+    result.affected = affected_value.value
+    result.last_insert_id = insert_value.value
+    result.warnings = read_int2_le(payload, insert_value.next + 2)
+    return Ok(result)
+}
+
+fun is_eof_packet(payload: String) -> Bool {
+    return payload.length() > 0 && payload.length() < 9 && byte_at(payload, 0) == 254
+}
+
+fun eof_warnings(payload: String) -> Int {
+    if payload.length() >= 5 {
+        return read_int2_le(payload, 1)
+    }
+    return 0
+}
+
+fun read_query_response(stream: TcpStream) -> Result<QueryResult, Error> {
+    let first = read_packet(stream)?
+    if first.payload.length() == 0 {
+        return Err(error_kind("mysql", "empty query response"))
+    }
+    let marker = byte_at(first.payload, 0)
+    if marker == 255 {
+        return Err(parse_server_error(first.payload))
+    }
+    if marker == 0 {
+        return parse_ok(first.payload)
+    }
+    if marker == 251 {
+        return Err(error_kind("mysql", "LOCAL INFILE requests are not supported"))
+    }
+
+    let count_value = read_lenenc(first.payload, 0)
+    if count_value.is_null || count_value.value < 1 {
+        return Err(error_kind("mysql", "malformed result-set header"))
+    }
+    let result = empty_result()
+    let i = 0
+    while i < count_value.value {
+        let packet = read_packet(stream)?
+        if packet.payload.length() > 0 && byte_at(packet.payload, 0) == 255 {
+            return Err(parse_server_error(packet.payload))
+        }
+        let column = parse_column(packet.payload)?
+        result.columns.push(column.name)
+        result.fields.push(column)
+        i = i + 1
+    }
+
+    let column_end = read_packet(stream)?
+    if !is_eof_packet(column_end.payload) {
+        return Err(error_kind("mysql", "missing result-set column terminator"))
+    }
+
+    let done = false
+    while !done {
+        let packet = read_packet(stream)?
+        if is_eof_packet(packet.payload) {
+            result.warnings = eof_warnings(packet.payload)
+            done = true
+        } else if packet.payload.length() > 0 && byte_at(packet.payload, 0) == 255 {
+            return Err(parse_server_error(packet.payload))
+        } else {
+            result.rows.push(parse_text_row(packet.payload, count_value.value)?)
+        }
+    }
+    return Ok(result)
 }
 
 fun parse_handshake(payload: String) -> Result<Handshake, Error> {
@@ -227,9 +419,40 @@ fun connect(
 }
 
 impl Connection {
+    // Run SQL and collect either a result set or write metadata.
+    fun query(self, sql: String) -> Result<QueryResult, Error> {
+        let _ = write_packet(self.stream, byte(3).concat(sql), 0)?
+        return read_query_response(self.stream)
+    }
+
+    // Run SQL and return its affected-row count.
+    fun execute(self, sql: String) -> Result<Int, Error> {
+        let result = self.query(sql)?
+        return Ok(result.affected)
+    }
+
     // Send COM_QUIT and close the socket. Best effort.
     fun close(self) {
         let _ = write_packet(self.stream, byte(1), 0)
         self.stream.close()
+    }
+}
+
+impl Row {
+    // Text value at zero-based column index `index`.
+    fun get(self, index: Int) -> String {
+        return self.values[index]
+    }
+
+    // Whether the value at zero-based column index `index` is SQL NULL.
+    fun is_null(self, index: Int) -> Bool {
+        return self.nulls[index]
+    }
+}
+
+impl QueryResult {
+    // Number of rows returned by the statement.
+    fun row_count(self) -> Int {
+        return self.rows.len()
     }
 }

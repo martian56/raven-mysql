@@ -1,7 +1,7 @@
 import std/string
 import std/test { assert_eq_int, assert_eq_str, assert_msg }
-import "./protocol" { byte, int2_le, int4_le }
-import "./lib" { parse_handshake, parse_server_error }
+import "./protocol" { byte, int2_le, int4_le, lenenc_string }
+import "./lib" { parse_column, parse_handshake, parse_ok, parse_server_error, parse_text_row }
 
 fun handshake_fixture() -> String {
     let caps = 1 | 4 | 8 | 512 | 8192 | 32768 | 131072 | 524288
@@ -37,4 +37,69 @@ fun test_parse_protocol_41_error() {
     let err = parse_server_error(payload)
     assert_eq_str(err.kind(), "mysql")
     assert_eq_str(err.message(), "ERROR 1045 (28000): Access denied")
+}
+
+fun column_fixture() -> String {
+    let payload = lenenc_string("def")
+    payload = payload.concat(lenenc_string("ravendb"))
+    payload = payload.concat(lenenc_string("pets"))
+    payload = payload.concat(lenenc_string("pets"))
+    payload = payload.concat(lenenc_string("name"))
+    payload = payload.concat(lenenc_string("name"))
+    payload = payload.concat(byte(12))
+    payload = payload.concat(int2_le(45)).concat(int4_le(1024))
+    payload = payload.concat(byte(253)).concat(int2_le(0)).concat(byte(0)).concat(int2_le(0))
+    return payload
+}
+
+fun test_parse_column_definition() {
+    match parse_column(column_fixture()) {
+        Ok(column) -> {
+            assert_eq_str(column.name, "name")
+            assert_eq_str(column.table, "pets")
+            assert_eq_str(column.database, "ravendb")
+            assert_eq_int(column.column_type, 253)
+            assert_eq_int(column.charset, 45)
+        },
+        Err(e) -> assert_msg(false, e.message()),
+    }
+}
+
+fun test_parse_text_row_with_null_and_empty_string() {
+    let payload = lenenc_string("7").concat(byte(251)).concat(lenenc_string(""))
+    match parse_text_row(payload, 3) {
+        Ok(row) -> {
+            assert_eq_str(row.get(0), "7")
+            assert_eq_int(
+                if row.is_null(1) {
+                    1
+                } else {
+                    0
+                },
+                1,
+            )
+            assert_eq_str(row.get(2), "")
+            assert_eq_int(
+                if row.is_null(2) {
+                    1
+                } else {
+                    0
+                },
+                0,
+            )
+        },
+        Err(e) -> assert_msg(false, e.message()),
+    }
+}
+
+fun test_parse_ok_packet_metadata() {
+    let payload = byte(0).concat(byte(3)).concat(byte(42)).concat(int2_le(2)).concat(int2_le(1))
+    match parse_ok(payload) {
+        Ok(result) -> {
+            assert_eq_int(result.affected, 3)
+            assert_eq_int(result.last_insert_id, 42)
+            assert_eq_int(result.warnings, 1)
+        },
+        Err(e) -> assert_msg(false, e.message()),
+    }
 }
