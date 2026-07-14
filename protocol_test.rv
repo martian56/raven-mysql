@@ -1,0 +1,26 @@
+import std/test { assert_eq_int, assert_eq_str }
+import "./protocol" { hex, int2_le, int3_le, int4_le, native_password_token, read_int2_le, read_int3_le, read_int4_le, sha1 }
+
+fun test_little_endian_integers_round_trip() {
+    assert_eq_int(read_int2_le(int2_le(48879), 0), 48879)
+    assert_eq_int(read_int3_le(int3_le(1193046), 0), 1193046)
+    assert_eq_int(read_int4_le(int4_le(305419896), 0), 305419896)
+}
+
+fun test_sha1_known_vectors() {
+    assert_eq_str(hex(sha1("")), "da39a3ee5e6b4b0d3255bfef95601890afd80709")
+    assert_eq_str(hex(sha1("abc")), "a9993e364706816aba3e25717850c26c9cd0d89d")
+    assert_eq_str(
+        hex(sha1("The quick brown fox jumps over the lazy dog")),
+        "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12",
+    )
+}
+
+fun test_native_password_token_known_vector() {
+    let scramble = "12345678901234567890"
+    assert_eq_str(
+        hex(native_password_token("secret", scramble)),
+        "0f8b9033e0897c0a8338ebe3dea9010dda47ab56",
+    )
+    assert_eq_str(native_password_token("", scramble), "")
+}

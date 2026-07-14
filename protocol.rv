@@ -1,0 +1,188 @@
+// Low-level byte and authentication helpers for the MySQL wire protocol.
+
+import std/string
+
+fun byte(n: Int) -> String {
+    return __str_from_byte(n & 255)
+}
+
+fun byte_at(data: String, offset: Int) -> Int {
+    return __str_byte_at(data, offset)
+}
+
+fun int2_le(n: Int) -> String {
+    return byte(n).concat(byte(n >> 8))
+}
+
+fun int3_le(n: Int) -> String {
+    return byte(n).concat(byte(n >> 8)).concat(byte(n >> 16))
+}
+
+fun int4_le(n: Int) -> String {
+    return byte(n).concat(byte(n >> 8)).concat(byte(n >> 16)).concat(byte(n >> 24))
+}
+
+fun read_int2_le(data: String, offset: Int) -> Int {
+    return byte_at(data, offset) | (byte_at(data, offset + 1) << 8)
+}
+
+fun read_int3_le(data: String, offset: Int) -> Int {
+    return byte_at(data, offset) | (byte_at(data, offset + 1) << 8) | (byte_at(data, offset + 2) << 16)
+}
+
+fun read_int4_le(data: String, offset: Int) -> Int {
+    return byte_at(data, offset) | (byte_at(data, offset + 1) << 8) | (byte_at(data, offset + 2) << 16) | (byte_at(
+        data,
+        offset + 3,
+    ) << 24)
+}
+
+fun xor_bytes(left: String, right: String) -> String {
+    let out = ""
+    let i = 0
+    let n = left.length()
+    while i < n && i < right.length() {
+        out = out.concat(byte(byte_at(left, i) ^ byte_at(right, i)))
+        i = i + 1
+    }
+    return out
+}
+
+fun u32(n: Int) -> Int {
+    return n & 4294967295
+}
+
+fun rotate_left_32(n: Int, bits: Int) -> Int {
+    let value = u32(n)
+    return u32((value << bits) | (value >> (32 - bits)))
+}
+
+fun int4_be(n: Int) -> String {
+    return byte(n >> 24).concat(byte(n >> 16)).concat(byte(n >> 8)).concat(byte(n))
+}
+
+fun read_int4_be(data: String, offset: Int) -> Int {
+    return (byte_at(data, offset) << 24) | (byte_at(data, offset + 1) << 16) | (byte_at(
+        data,
+        offset + 2,
+    ) << 8) | byte_at(data, offset + 3)
+}
+
+// SHA-1 is required by MySQL's mysql_native_password challenge-response
+// authentication. It is kept private to the protocol implementation rather
+// than exposed as a general-purpose cryptographic API.
+fun sha1(data: String) -> String {
+    let padded: List<Int> = []
+    let i = 0
+    while i < data.length() {
+        padded.push(byte_at(data, i))
+        i = i + 1
+    }
+
+    let bit_len = data.length() * 8
+    padded.push(128)
+    while padded.len() % 64 != 56 {
+        padded.push(0)
+    }
+
+    let high_len = bit_len >> 32
+    padded.push((high_len >> 24) & 255)
+    padded.push((high_len >> 16) & 255)
+    padded.push((high_len >> 8) & 255)
+    padded.push(high_len & 255)
+    padded.push((bit_len >> 24) & 255)
+    padded.push((bit_len >> 16) & 255)
+    padded.push((bit_len >> 8) & 255)
+    padded.push(bit_len & 255)
+
+    let h0 = 1732584193
+    let h1 = 4023233417
+    let h2 = 2562383102
+    let h3 = 271733878
+    let h4 = 3285377520
+
+    let chunk = 0
+    while chunk < padded.len() {
+        let words: List<Int> = []
+        let wi = 0
+        while wi < 80 {
+            words.push(0)
+            wi = wi + 1
+        }
+
+        wi = 0
+        while wi < 16 {
+            let off = chunk + wi * 4
+            words[wi] = (padded[off] << 24) | (padded[off + 1] << 16) | (padded[off + 2] << 8) | padded[off + 3]
+            wi = wi + 1
+        }
+        while wi < 80 {
+            words[wi] = rotate_left_32(words[wi - 3] ^ words[wi - 8] ^ words[wi - 14] ^ words[wi - 16], 1)
+            wi = wi + 1
+        }
+
+        let a = h0
+        let b = h1
+        let c = h2
+        let d = h3
+        let e = h4
+        let round = 0
+        while round < 80 {
+            let f = 0
+            let k = 0
+            if round < 20 {
+                f = (b & c) | ((u32(b) ^ 4294967295) & d)
+                k = 1518500249
+            } else if round < 40 {
+                f = b ^ c ^ d
+                k = 1859775393
+            } else if round < 60 {
+                f = (b & c) | (b & d) | (c & d)
+                k = 2400959708
+            } else {
+                f = b ^ c ^ d
+                k = 3395469782
+            }
+            let temp = u32(rotate_left_32(a, 5) + f + e + k + words[round])
+            e = d
+            d = c
+            c = rotate_left_32(b, 30)
+            b = a
+            a = temp
+            round = round + 1
+        }
+
+        h0 = u32(h0 + a)
+        h1 = u32(h1 + b)
+        h2 = u32(h2 + c)
+        h3 = u32(h3 + d)
+        h4 = u32(h4 + e)
+        chunk = chunk + 64
+    }
+
+    return int4_be(h0).concat(int4_be(h1)).concat(int4_be(h2)).concat(int4_be(h3)).concat(
+        int4_be(h4),
+    )
+}
+
+fun native_password_token(password: String, scramble: String) -> String {
+    if password.length() == 0 {
+        return ""
+    }
+    let stage1 = sha1(password)
+    let stage2 = sha1(stage1)
+    return xor_bytes(stage1, sha1(scramble.concat(stage2)))
+}
+
+fun hex(data: String) -> String {
+    const DIGITS: String = "0123456789abcdef"
+    let out = ""
+    let i = 0
+    while i < data.length() {
+        let value = byte_at(data, i)
+        out = out.concat(DIGITS.substring(value >> 4, (value >> 4) + 1))
+        out = out.concat(DIGITS.substring(value & 15, (value & 15) + 1))
+        i = i + 1
+    }
+    return out
+}
