@@ -1,5 +1,5 @@
 import std/test { assert_eq_int, assert_eq_str }
-import "./protocol" { hex, int2_le, int3_le, int4_le, native_password_token, read_int2_le, read_int3_le, read_int4_le, sha1 }
+import "./protocol" { byte, byte_at, frame_packet, hex, int2_le, int3_le, int4_le, lenenc_int, lenenc_string, native_password_token, read_int2_le, read_int3_le, read_int4_le, read_lenenc, sha1 }
 
 fun test_little_endian_integers_round_trip() {
     assert_eq_int(read_int2_le(int2_le(48879), 0), 48879)
@@ -23,4 +23,46 @@ fun test_native_password_token_known_vector() {
         "0f8b9033e0897c0a8338ebe3dea9010dda47ab56",
     )
     assert_eq_str(native_password_token("", scramble), "")
+}
+
+fun test_length_encoded_integer_boundaries() {
+    let small = read_lenenc(lenenc_int(250), 0)
+    assert_eq_int(small.value, 250)
+    assert_eq_int(small.next, 1)
+
+    let medium = read_lenenc(lenenc_int(251), 0)
+    assert_eq_int(medium.value, 251)
+    assert_eq_int(medium.next, 3)
+
+    let large = read_lenenc(lenenc_int(70000), 0)
+    assert_eq_int(large.value, 70000)
+    assert_eq_int(large.next, 4)
+
+    let huge = read_lenenc(lenenc_int(4294967296), 0)
+    assert_eq_int(huge.value, 4294967296)
+    assert_eq_int(huge.next, 9)
+}
+
+fun test_length_encoded_null_and_string() {
+    let null_value = read_lenenc(byte(251), 0)
+    assert_eq_int(
+        if null_value.is_null {
+            1
+        } else {
+            0
+        },
+        1,
+    )
+
+    let encoded = lenenc_string("hello")
+    let length = read_lenenc(encoded, 0)
+    assert_eq_int(length.value, 5)
+    assert_eq_str(encoded.substring(length.next, length.next + length.value), "hello")
+}
+
+fun test_packet_frame_contains_length_sequence_and_payload() {
+    let framed = frame_packet("hello", 7)
+    assert_eq_int(read_int3_le(framed, 0), 5)
+    assert_eq_int(byte_at(framed, 3), 7)
+    assert_eq_str(framed.substring(4, framed.length()), "hello")
 }

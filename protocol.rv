@@ -1,6 +1,21 @@
 // Low-level byte and authentication helpers for the MySQL wire protocol.
 
 import std/string
+import std/net { TcpStream }
+import std/error { error_kind }
+
+const MAX_PACKET_PAYLOAD: Int = 16777215
+
+struct Packet {
+    sequence: Int,
+    payload: String,
+}
+
+struct LenEnc {
+    value: Int,
+    next: Int,
+    is_null: Bool,
+}
 
 fun byte(n: Int) -> String {
     return __str_from_byte(n & 255)
@@ -35,6 +50,110 @@ fun read_int4_le(data: String, offset: Int) -> Int {
         data,
         offset + 3,
     ) << 24)
+}
+
+fun int8_le(n: Int) -> String {
+    let out = ""
+    let shift = 0
+    while shift < 64 {
+        out = out.concat(byte(n >> shift))
+        shift = shift + 8
+    }
+    return out
+}
+
+fun read_int8_le(data: String, offset: Int) -> Int {
+    let out = 0
+    let i = 0
+    while i < 8 {
+        out = out | (byte_at(data, offset + i) << (i * 8))
+        i = i + 1
+    }
+    return out
+}
+
+fun lenenc_int(n: Int) -> String {
+    if n < 251 {
+        return byte(n)
+    }
+    if n <= 65535 {
+        return byte(252).concat(int2_le(n))
+    }
+    if n <= 16777215 {
+        return byte(253).concat(int3_le(n))
+    }
+    return byte(254).concat(int8_le(n))
+}
+
+fun lenenc_string(value: String) -> String {
+    return lenenc_int(value.length()).concat(value)
+}
+
+fun read_lenenc(data: String, offset: Int) -> LenEnc {
+    let first = byte_at(data, offset)
+    if first < 251 {
+        return LenEnc { value: first, next: offset + 1, is_null: false }
+    }
+    if first == 251 {
+        return LenEnc { value: 0, next: offset + 1, is_null: true }
+    }
+    if first == 252 {
+        return LenEnc { value: read_int2_le(data, offset + 1), next: offset + 3, is_null: false }
+    }
+    if first == 253 {
+        return LenEnc { value: read_int3_le(data, offset + 1), next: offset + 4, is_null: false }
+    }
+    return LenEnc { value: read_int8_le(data, offset + 1), next: offset + 9, is_null: false }
+}
+
+fun frame_packet(payload: String, sequence: Int) -> String {
+    return int3_le(payload.length()).concat(byte(sequence)).concat(payload)
+}
+
+fun read_exact(stream: TcpStream, count: Int) -> Result<String, Error> {
+    let out = ""
+    while out.length() < count {
+        let part = stream.read(count - out.length())?
+        if part.length() == 0 {
+            return Err(error_kind("mysql", "connection closed while reading a packet"))
+        }
+        out = out.concat(part)
+    }
+    return Ok(out)
+}
+
+// Read one logical packet. MySQL splits payloads at 16 MiB - 1; continuation
+// packets are joined so callers always see one complete protocol message.
+fun read_packet(stream: TcpStream) -> Result<Packet, Error> {
+    let payload = ""
+    let sequence = 0
+    let more = true
+    while more {
+        let header = read_exact(stream, 4)?
+        let length = read_int3_le(header, 0)
+        sequence = byte_at(header, 3)
+        if length > 0 {
+            payload = payload.concat(read_exact(stream, length)?)
+        }
+        more = length == MAX_PACKET_PAYLOAD
+    }
+    return Ok(Packet { sequence, payload })
+}
+
+// Write one logical packet and return the next sequence number. An exact
+// multiple of the maximum payload is terminated by the protocol's empty packet.
+fun write_packet(stream: TcpStream, payload: String, sequence: Int) -> Result<Int, Error> {
+    let offset = 0
+    let seq = sequence
+    while payload.length() - offset >= MAX_PACKET_PAYLOAD {
+        let chunk = payload.substring(offset, offset + MAX_PACKET_PAYLOAD)
+        let _ = stream.write(frame_packet(chunk, seq))?
+        seq = (seq + 1) & 255
+        offset = offset + MAX_PACKET_PAYLOAD
+    }
+    let tail = payload.substring(offset, payload.length())
+    let _ = stream.write(frame_packet(tail, seq))?
+    return Ok((seq + 1) & 255)
 }
 
 fun xor_bytes(left: String, right: String) -> String {
