@@ -1,5 +1,7 @@
 # raven-mysql
 
+[![CI](https://github.com/martian56/raven-mysql/actions/workflows/ci.yml/badge.svg)](https://github.com/martian56/raven-mysql/actions/workflows/ci.yml)
+
 A pure-Raven MySQL client for the
 [Raven programming language](https://github.com/martian56/raven). It speaks
 the MySQL client/server protocol over `std/net`; applications do not need
@@ -42,12 +44,12 @@ Add this to `rv.toml`:
 
 ```toml
 [dependencies]
-"github.com/martian56/raven-mysql" = "v0.1.0"
+"github.com/martian56/raven-mysql" = "v0.2.0"
 ```
 
 ## Quick start
 
-```raven
+```rust
 import std/io { println }
 import "github.com/martian56/raven-mysql" { connect }
 
@@ -82,7 +84,7 @@ See [`examples/basic.rv`](examples/basic.rv) for a complete runnable example.
 
 ### Connecting
 
-```raven
+```rust
 connect(host, port, user, password, database) -> Result<Connection, Error>
 connect_with_timeout(host, port, user, password, database, timeout_ms) -> Result<Connection, Error>
 ```
@@ -93,7 +95,7 @@ blocking socket I/O.
 
 An open `Connection` exposes the server's version string and connection ID:
 
-```raven
+```rust
 println(conn.server_version)
 println("connection ${conn.connection_id}")
 ```
@@ -122,7 +124,7 @@ stream.
 
 Use parameters for every value that is not a fixed part of the SQL:
 
-```raven
+```rust
 let _ = conn.execute_params(
     "INSERT INTO users (name, city) VALUES (?, ?)",
     [user_name, city],
@@ -172,7 +174,7 @@ before a quote; bound values remain safe hexadecimal literals in either mode.
 returns `""`, so call `Row.is_null(index)` to distinguish it from an actual
 empty string:
 
-```raven
+```rust
 if row.is_null(2) {
     println("no value")
 } else {
