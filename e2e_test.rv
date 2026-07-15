@@ -436,6 +436,24 @@ fun test_e2e_bound_values_ignore_session_escape_mode() {
     conn.close()
 }
 
+fun test_e2e_no_backslash_escape_sql_source_is_scanned_correctly() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let _ = must(conn.execute("SET SESSION sql_mode = 'NO_BACKSLASH_ESCAPES'"))
+    let result = must(
+        conn.query_params_no_backslash_escapes(
+            "SELECT 'backslash\\' AS literal_value, ? AS bound_value",
+            ["safe"],
+        ),
+    )
+    assert_eq_int(result.row_count(), 1)
+    assert_eq_str(result.rows[0].get(0), "backslash\\")
+    assert_eq_str(result.rows[0].get(1), "safe")
+    conn.close()
+}
+
 fun test_e2e_server_warning_count_is_reported() {
     if !e2e_enabled() {
         return

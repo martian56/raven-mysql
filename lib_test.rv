@@ -1,7 +1,7 @@
 import std/string
 import std/test { assert_eq_int, assert_eq_str, assert_msg }
 import "./protocol" { byte, int2_le, int4_le, lenenc_string }
-import "./lib" { bind_sql_params, Handshake, handshake_response, parse_column, parse_handshake, parse_ok, parse_server_error, parse_text_row }
+import "./lib" { bind_sql_params, bind_sql_params_no_backslash_escapes, Handshake, handshake_response, parse_auth_switch, parse_column, parse_handshake, parse_ok, parse_server_error, parse_text_row }
 
 fun handshake_fixture() -> String {
     let caps = 1 | 4 | 8 | 512 | 8192 | 32768 | 131072 | 524288
@@ -196,5 +196,45 @@ fun test_bind_sql_params_rejects_wrong_arity() {
     match bind_sql_params("SELECT 1", one) {
         Ok(sql) -> assert_msg(false, "expected too-many-parameters error"),
         Err(e) -> assert_eq_str(e.message(), "too many parameters for SQL placeholders"),
+    }
+}
+
+fun test_bind_sql_params_supports_both_backslash_modes() {
+    let params: List<Option<String>> = [Some("bound")]
+    assert_eq_str(
+        bind_or_fail("SELECT 'it\\'s ?', ?", params),
+        "SELECT 'it\\'s ?', _utf8mb4 X'626f756e64'",
+    )
+    match bind_sql_params("SELECT 'backslash\\', ?", params) {
+        Ok(sql) -> assert_msg(
+            false,
+            "default quote rules unexpectedly matched NO_BACKSLASH_ESCAPES",
+        ),
+        Err(e) -> assert_eq_str(e.message(), "too many parameters for SQL placeholders"),
+    }
+    match bind_sql_params_no_backslash_escapes("SELECT 'backslash\\', ?", params) {
+        Ok(sql) -> assert_eq_str(sql, "SELECT 'backslash\\', _utf8mb4 X'626f756e64'"),
+        Err(e) -> assert_msg(false, e.message()),
+    }
+}
+
+fun test_authentication_switch_validation() {
+    let valid = byte(254).concat("mysql_native_password").concat(byte(0)).concat(
+        "12345678901234567890",
+    ).concat(byte(0))
+    match parse_auth_switch(valid) {
+        Ok(auth) -> {
+            assert_eq_str(auth.plugin, "mysql_native_password")
+            assert_eq_str(auth.scramble, "12345678901234567890")
+        },
+        Err(e) -> assert_msg(false, e.message()),
+    }
+    match parse_auth_switch(byte(254).concat("unterminated")) {
+        Ok(auth) -> assert_msg(false, "unterminated plugin unexpectedly parsed"),
+        Err(e) -> assert_eq_str(e.message(), "malformed authentication switch request"),
+    }
+    match parse_auth_switch(byte(254).concat("mysql_native_password").concat(byte(0))) {
+        Ok(auth) -> assert_msg(false, "missing scramble unexpectedly parsed"),
+        Err(e) -> assert_eq_str(e.message(), "authentication switch request has no scramble"),
     }
 }

@@ -5,6 +5,7 @@ import std/net { TcpStream }
 import std/error { error_kind }
 
 const MAX_PACKET_PAYLOAD: Int = 16777215
+const MAX_LOGICAL_PACKET: Int = 268435456
 
 struct Packet {
     sequence: Int,
@@ -123,11 +124,13 @@ fun read_exact(stream: TcpStream, count: Int) -> Result<String, Error> {
 }
 
 // Read one logical packet. MySQL splits payloads at 16 MiB - 1; continuation
-// packets are joined so callers always see one complete protocol message.
-fun read_packet(stream: TcpStream) -> Result<Packet, Error> {
+// packets are joined so callers always see one complete protocol message. A
+// non-negative `first_sequence` validates the first physical packet as well as
+// every continuation packet.
+fun read_packet_from(stream: TcpStream, first_sequence: Int) -> Result<Packet, Error> {
     let payload = ""
     let sequence = 0
-    let expected_sequence = -1
+    let expected_sequence = first_sequence
     let more = true
     while more {
         let header = read_exact(stream, 4)?
@@ -142,12 +145,31 @@ fun read_packet(stream: TcpStream) -> Result<Packet, Error> {
             )
         }
         expected_sequence = (sequence + 1) & 255
+        if payload.length() + length > MAX_LOGICAL_PACKET {
+            return Err(error_kind("mysql", "logical packet exceeds the 256 MiB safety limit"))
+        }
         if length > 0 {
             payload = payload.concat(read_exact(stream, length)?)
         }
         more = length == MAX_PACKET_PAYLOAD
     }
     return Ok(Packet { sequence, payload })
+}
+
+fun read_packet(stream: TcpStream) -> Result<Packet, Error> {
+    return read_packet_from(stream, -1)
+}
+
+fun write_all(stream: TcpStream, data: String) -> Result<Int, Error> {
+    let written = 0
+    while written < data.length() {
+        let count = stream.write(data.substring(written, data.length()))?
+        if count <= 0 {
+            return Err(error_kind("mysql", "connection stopped accepting packet bytes"))
+        }
+        written = written + count
+    }
+    return Ok(written)
 }
 
 // Write one logical packet and return the next sequence number. An exact
@@ -157,12 +179,12 @@ fun write_packet(stream: TcpStream, payload: String, sequence: Int) -> Result<In
     let seq = sequence
     while payload.length() - offset >= MAX_PACKET_PAYLOAD {
         let chunk = payload.substring(offset, offset + MAX_PACKET_PAYLOAD)
-        let _ = stream.write(frame_packet(chunk, seq))?
+        let _ = write_all(stream, frame_packet(chunk, seq))?
         seq = (seq + 1) & 255
         offset = offset + MAX_PACKET_PAYLOAD
     }
     let tail = payload.substring(offset, payload.length())
-    let _ = stream.write(frame_packet(tail, seq))?
+    let _ = write_all(stream, frame_packet(tail, seq))?
     return Ok((seq + 1) & 255)
 }
 

@@ -8,7 +8,7 @@ import std/net
 import std/net { TcpStream }
 import std/string
 import std/error { error_kind }
-import "./protocol" { byte, byte_at, hex, int4_le, LenEnc, native_password_token, read_int2_le, read_int4_le, read_lenenc, read_packet, write_packet }
+import "./protocol" { byte, byte_at, hex, int4_le, LenEnc, native_password_token, read_int2_le, read_int4_le, read_lenenc, read_packet_from, write_packet }
 
 const CLIENT_LONG_PASSWORD: Int = 1
 const CLIENT_LONG_FLAG: Int = 4
@@ -59,6 +59,11 @@ struct Handshake {
     connection_id: Int,
 }
 
+struct AuthSwitch {
+    plugin: String,
+    scramble: String,
+}
+
 fun zeroes(count: Int) -> String {
     let out = ""
     let i = 0
@@ -85,7 +90,11 @@ fun sql_text_literal(value: String) -> String {
 // strings, quoted identifiers, and all MySQL comment forms are left untouched.
 // Values become hexadecimal literals, so quotes and control bytes cannot alter
 // the surrounding SQL and the current backslash-escape mode is irrelevant.
-fun bind_sql_params(sql: String, params: List<Option<String>>) -> Result<String, Error> {
+fun bind_sql_params_mode(
+    sql: String,
+    params: List<Option<String>>,
+    backslash_escapes: Bool,
+) -> Result<String, Error> {
     let normal = 0
     let single_quote = 1
     let double_quote = 2
@@ -162,7 +171,7 @@ fun bind_sql_params(sql: String, params: List<Option<String>>) -> Result<String,
             } else {
                 96
             }
-            if current == 92 && next >= 0 {
+            if backslash_escapes && current == 92 && next >= 0 {
                 out = out.concat(byte(next))
                 i = i + 1
             } else if current == delimiter && next == delimiter {
@@ -179,6 +188,19 @@ fun bind_sql_params(sql: String, params: List<Option<String>>) -> Result<String,
         return Err(error_kind("mysql", "too many parameters for SQL placeholders"))
     }
     return Ok(out)
+}
+
+// Bind parameters using MySQL's default backslash-escape string mode.
+fun bind_sql_params(sql: String, params: List<Option<String>>) -> Result<String, Error> {
+    return bind_sql_params_mode(sql, params, true)
+}
+
+// Bind parameters for a session whose sql_mode contains NO_BACKSLASH_ESCAPES.
+fun bind_sql_params_no_backslash_escapes(
+    sql: String,
+    params: List<Option<String>>,
+) -> Result<String, Error> {
+    return bind_sql_params_mode(sql, params, false)
 }
 
 fun text_params(params: List<String>) -> List<Option<String>> {
@@ -357,8 +379,9 @@ fun eof_warnings(payload: String) -> Int {
     return 0
 }
 
-fun read_query_response(stream: TcpStream) -> Result<QueryResult, Error> {
-    let first = read_packet(stream)?
+fun read_query_response(stream: TcpStream, first_sequence: Int) -> Result<QueryResult, Error> {
+    let first = read_packet_from(stream, first_sequence)?
+    let expected_sequence = (first.sequence + 1) & 255
     if first.payload.length() == 0 {
         return Err(error_kind("mysql", "empty query response"))
     }
@@ -370,6 +393,14 @@ fun read_query_response(stream: TcpStream) -> Result<QueryResult, Error> {
         return parse_ok(first.payload)
     }
     if marker == 251 {
+        // Refuse LOCAL INFILE without leaving the connection waiting for a
+        // client file upload. An empty packet ends the upload exchange; consume
+        // the server's final response before returning the policy error.
+        let next_sequence = write_packet(stream, "", expected_sequence)?
+        let final_packet = read_packet_from(stream, next_sequence)?
+        if final_packet.payload.length() > 0 && byte_at(final_packet.payload, 0) == 255 {
+            let _ = parse_server_error(final_packet.payload)
+        }
         return Err(error_kind("mysql", "LOCAL INFILE requests are not supported"))
     }
 
@@ -380,7 +411,8 @@ fun read_query_response(stream: TcpStream) -> Result<QueryResult, Error> {
     let result = empty_result()
     let i = 0
     while i < count_value.value {
-        let packet = read_packet(stream)?
+        let packet = read_packet_from(stream, expected_sequence)?
+        expected_sequence = (packet.sequence + 1) & 255
         if packet.payload.length() > 0 && byte_at(packet.payload, 0) == 255 {
             return Err(parse_server_error(packet.payload))
         }
@@ -390,14 +422,16 @@ fun read_query_response(stream: TcpStream) -> Result<QueryResult, Error> {
         i = i + 1
     }
 
-    let column_end = read_packet(stream)?
+    let column_end = read_packet_from(stream, expected_sequence)?
+    expected_sequence = (column_end.sequence + 1) & 255
     if !is_eof_packet(column_end.payload) {
         return Err(error_kind("mysql", "missing result-set column terminator"))
     }
 
     let done = false
     while !done {
-        let packet = read_packet(stream)?
+        let packet = read_packet_from(stream, expected_sequence)?
+        expected_sequence = (packet.sequence + 1) & 255
         if is_eof_packet(packet.payload) {
             result.warnings = eof_warnings(packet.payload)
             done = true
@@ -496,6 +530,30 @@ fun handshake_response(
     return Ok(response)
 }
 
+fun parse_auth_switch(packet_payload: String) -> Result<AuthSwitch, Error> {
+    if packet_payload.length() < 2 || byte_at(packet_payload, 0) != 254 {
+        return Err(error_kind("mysql", "malformed authentication switch request"))
+    }
+    let plugin_end = find_nul(packet_payload, 1)
+    if plugin_end >= packet_payload.length() {
+        return Err(error_kind("mysql", "malformed authentication switch request"))
+    }
+    let plugin = packet_payload.substring(1, plugin_end)
+    if plugin.length() == 0 {
+        return Err(error_kind("mysql", "authentication switch request has no plugin"))
+    }
+    if plugin_end + 1 >= packet_payload.length() {
+        return Err(error_kind("mysql", "authentication switch request has no scramble"))
+    }
+    let scramble = strip_trailing_nul(
+        packet_payload.substring(plugin_end + 1, packet_payload.length()),
+    )
+    if scramble.length() == 0 {
+        return Err(error_kind("mysql", "authentication switch request has no scramble"))
+    }
+    return Ok(AuthSwitch { plugin, scramble })
+}
+
 fun finish_authentication(
     stream: TcpStream,
     packet_payload: String,
@@ -513,16 +571,16 @@ fun finish_authentication(
         return Err(parse_server_error(packet_payload))
     }
     if marker == 254 {
-        let plugin_end = find_nul(packet_payload, 1)
-        let plugin = packet_payload.substring(1, plugin_end)
-        if plugin != "mysql_native_password" {
-            return Err(error_kind("mysql", "unsupported authentication plugin: ${plugin}"))
+        let auth_switch = parse_auth_switch(packet_payload)?
+        if auth_switch.plugin != "mysql_native_password" {
+            return Err(error_kind("mysql", "unsupported authentication plugin: ${auth_switch.plugin}"))
         }
-        let scramble = strip_trailing_nul(
-            packet_payload.substring(plugin_end + 1, packet_payload.length()),
-        )
-        let _ = write_packet(stream, native_password_token(password, scramble), sequence + 1)?
-        let final_packet = read_packet(stream)?
+        let next_sequence = write_packet(
+            stream,
+            native_password_token(password, auth_switch.scramble),
+            (sequence + 1) & 255,
+        )?
+        let final_packet = read_packet_from(stream, next_sequence)?
         if final_packet.payload.length() > 0 && byte_at(final_packet.payload, 0) == 0 {
             return Ok(true)
         }
@@ -540,11 +598,11 @@ fun establish_connection(
     password: String,
     database: String,
 ) -> Result<Connection, Error> {
-    let greeting = read_packet(stream)?
+    let greeting = read_packet_from(stream, 0)?
     let handshake = parse_handshake(greeting.payload)?
     let response = handshake_response(handshake, user, password, database)?
-    let _ = write_packet(stream, response, 1)?
-    let auth = read_packet(stream)?
+    let next_sequence = write_packet(stream, response, (greeting.sequence + 1) & 255)?
+    let auth = read_packet_from(stream, next_sequence)?
     finish_authentication(stream, auth.payload, auth.sequence, password)?
     return Ok(
         Connection {
@@ -589,8 +647,12 @@ fun connect(
     return connect_with_timeout(host, port, user, password, database, 30000)
 }
 
-fun read_simple_command_response(stream: TcpStream, command_name: String) -> Result<Bool, Error> {
-    let packet = read_packet(stream)?
+fun read_simple_command_response(
+    stream: TcpStream,
+    command_name: String,
+    first_sequence: Int,
+) -> Result<Bool, Error> {
+    let packet = read_packet_from(stream, first_sequence)?
     if packet.payload.length() == 0 {
         return Err(error_kind("mysql", "empty ${command_name} response"))
     }
@@ -614,20 +676,20 @@ impl Connection {
 
     // Ask the server to verify that this connection is alive.
     fun ping(self) -> Result<Bool, Error> {
-        let _ = write_packet(self.stream, byte(14), 0)?
-        return read_simple_command_response(self.stream, "PING")
+        let next_sequence = write_packet(self.stream, byte(14), 0)?
+        return read_simple_command_response(self.stream, "PING", next_sequence)
     }
 
     // Change the default database for this connection with COM_INIT_DB.
     fun select_database(self, database: String) -> Result<Bool, Error> {
-        let _ = write_packet(self.stream, byte(2).concat(database), 0)?
-        return read_simple_command_response(self.stream, "INIT_DB")
+        let next_sequence = write_packet(self.stream, byte(2).concat(database), 0)?
+        return read_simple_command_response(self.stream, "INIT_DB", next_sequence)
     }
 
     // Run SQL and collect either a result set or write metadata.
     fun query(self, sql: String) -> Result<QueryResult, Error> {
-        let _ = write_packet(self.stream, byte(3).concat(sql), 0)?
-        return read_query_response(self.stream)
+        let next_sequence = write_packet(self.stream, byte(3).concat(sql), 0)?
+        return read_query_response(self.stream, next_sequence)
     }
 
     // Run SQL and return its affected-row count.
@@ -651,6 +713,25 @@ impl Connection {
         return self.query(bind_sql_params(sql, params)?)
     }
 
+    // Parameterized query for sessions using NO_BACKSLASH_ESCAPES. The mode
+    // changes how quotes in SQL source are scanned; bound values remain hex
+    // literals in both modes.
+    fun query_optional_params_no_backslash_escapes(
+        self,
+        sql: String,
+        params: List<Option<String>>,
+    ) -> Result<QueryResult, Error> {
+        return self.query(bind_sql_params_no_backslash_escapes(sql, params)?)
+    }
+
+    fun query_params_no_backslash_escapes(
+        self,
+        sql: String,
+        params: List<String>,
+    ) -> Result<QueryResult, Error> {
+        return self.query_optional_params_no_backslash_escapes(sql, text_params(params))
+    }
+
     fun execute_params(self, sql: String, params: List<String>) -> Result<Int, Error> {
         let result = self.query_params(sql, params)?
         return Ok(result.affected)
@@ -662,6 +743,24 @@ impl Connection {
         params: List<Option<String>>,
     ) -> Result<Int, Error> {
         let result = self.query_optional_params(sql, params)?
+        return Ok(result.affected)
+    }
+
+    fun execute_optional_params_no_backslash_escapes(
+        self,
+        sql: String,
+        params: List<Option<String>>,
+    ) -> Result<Int, Error> {
+        let result = self.query_optional_params_no_backslash_escapes(sql, params)?
+        return Ok(result.affected)
+    }
+
+    fun execute_params_no_backslash_escapes(
+        self,
+        sql: String,
+        params: List<String>,
+    ) -> Result<Int, Error> {
+        let result = self.query_params_no_backslash_escapes(sql, params)?
         return Ok(result.affected)
     }
 
