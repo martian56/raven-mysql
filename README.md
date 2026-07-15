@@ -18,6 +18,8 @@ the MySQL client/server protocol over `std/net`; applications do not need
 - Correct distinction between SQL `NULL` and an empty string.
 - UTF-8, embedded NUL bytes, large values, and logical messages split across
   MySQL's 16 MiB packet boundary.
+- Full packet-sequence validation across commands, responses, and continuation
+  packets, with partial socket writes retried until complete.
 - Transactions through ordinary SQL (`START TRANSACTION`, `COMMIT`, and
   `ROLLBACK`).
 - Server error codes and SQLSTATE values in Raven `Error` results; connections
@@ -28,7 +30,7 @@ the MySQL client/server protocol over `std/net`; applications do not need
 
 ## Requirements
 
-- Raven 2.25.6 or newer.
+- Raven 2.26.1 or newer.
 - A MySQL user configured with `mysql_native_password`.
 
 The Docker test environment in this repository configures an appropriate user
@@ -36,7 +38,7 @@ automatically.
 
 ## Install
 
-After the repository's first release, add this to `rv.toml`:
+Add this to `rv.toml`:
 
 ```toml
 [dependencies]
@@ -109,6 +111,8 @@ stream.
   `List<String>` to `?` placeholders.
 - `query_optional_params(sql, params)` and `execute_optional_params(sql,
   params)` accept `List<Option<String>>`; `None` binds SQL `NULL`.
+- The corresponding `*_no_backslash_escapes` methods scan SQL source using
+  `NO_BACKSLASH_ESCAPES` quote rules.
 - `ping() -> Result<Bool, Error>` sends `COM_PING`.
 - `select_database(name) -> Result<Bool, Error>` sends `COM_INIT_DB`.
 - `set_timeout_ms(ms)` changes the read and write timeout for later commands.
@@ -141,6 +145,13 @@ into SQL syntax.
 Parameters are text values. MySQL coerces them using the target column or
 expression, so they work for string, integer, decimal, date, and similar
 contexts. Use `query_optional_params` when a value must be SQL `NULL`.
+
+The SQL scanner must use the same quote rules as the server session. The normal
+methods target MySQL's default backslash-escape mode. After enabling
+`NO_BACKSLASH_ESCAPES`, use `query_params_no_backslash_escapes`,
+`query_optional_params_no_backslash_escapes`, or their `execute` equivalents.
+This matters when the fixed SQL source itself contains a backslash immediately
+before a quote; bound values remain safe hexadecimal literals in either mode.
 
 ### Results
 
@@ -233,7 +244,8 @@ The live suite covers authentication success and failure, CRUD, affected rows,
 insert IDs, metadata, SQL errors and connection recovery, nullable parameters,
 Unicode and embedded NULs, transaction commit and rollback, warnings, multiple
 connections, large values, and both query and result payloads crossing the
-16 MiB packet boundary.
+16 MiB packet boundary. It also covers both SQL string escape modes and packet
+sequence continuity across multi-packet commands.
 
 ## Compatibility and limits
 
@@ -245,9 +257,10 @@ connections, large values, and both query and result payloads crossing the
 - Parameters use safe client-side hexadecimal literals rather than MySQL's
   binary prepared-statement protocol. All parameter and result values are text.
 - A `QueryResult` collects all rows in memory; there is no streaming cursor yet.
+- A single logical protocol message is limited to 256 MiB to bound memory use
+  when connected to a malformed or hostile server.
 - Multiple result sets and multi-statement execution are not exposed.
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
