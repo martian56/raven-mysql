@@ -1,17 +1,17 @@
-import std/string
-import std/test { assert_eq_int, assert_eq_str, assert_msg }
-import "./protocol" { byte, int2_le, int4_le, lenenc_string }
-import "./lib" { bind_sql_params, bind_sql_params_no_backslash_escapes, Handshake, handshake_response, parse_auth_switch, parse_column, parse_handshake, parse_ok, parse_server_error, parse_text_row }
+import std.string
+from std.test import assert_eq_int, assert_eq_str, assert_msg
+from "./protocol" import byte, int2_le, int4_le, lenenc_string
+from "./lib" import bind_sql_params, bind_sql_params_no_backslash_escapes, Handshake, handshake_response, parse_auth_switch, parse_column, parse_handshake, parse_ok, parse_server_error, parse_text_row
 
-fun handshake_fixture() -> String {
+fun handshake_fixture() -> str {
     let caps = 1 | 4 | 8 | 512 | 8192 | 32768 | 131072 | 524288
-    let payload = byte(10).concat("8.0.43").concat(byte(0))
+    var payload = byte(10).concat("8.0.43").concat(byte(0))
     payload = payload.concat(int4_le(1234))
     payload = payload.concat("12345678").concat(byte(0))
     payload = payload.concat(int2_le(caps & 65535))
     payload = payload.concat(byte(45)).concat(int2_le(2))
     payload = payload.concat(int2_le(caps >> 16)).concat(byte(21))
-    let i = 0
+    var i = 0
     while i < 10 {
         payload = payload.concat(byte(0))
         i = i + 1
@@ -22,47 +22,45 @@ fun handshake_fixture() -> String {
 
 fun test_parse_server_handshake() {
     match parse_handshake(handshake_fixture()) {
-        Ok(handshake) -> {
+        case Ok(handshake) {
             assert_eq_str(handshake.server_version, "8.0.43")
             assert_eq_int(handshake.connection_id, 1234)
             assert_eq_str(handshake.scramble, "12345678abcdefghijkl")
             assert_eq_str(handshake.plugin, "mysql_native_password")
-        },
-        Err(e) -> assert_msg(false, e.message()),
+        }
+        case Err(e) { assert_msg(false, e.message()) }
     }
 }
 
 fun test_unsupported_authentication_plugin_is_explicit() {
-    let handshake = Handshake {
+    let handshake = Handshake(
         capabilities: 1 | 4 | 512 | 8192 | 32768 | 131072 | 524288,
         scramble: "12345678901234567890",
         plugin: "caching_sha2_password",
         server_version: "8.0.43",
         connection_id: 1,
-    }
+    )
     match handshake_response(handshake, "raven", "secret", "ravendb") {
-        Ok(response) -> assert_msg(false, "expected unsupported plugin to fail"),
-        Err(e) -> assert_eq_str(
-            e.message(),
-            "unsupported authentication plugin: caching_sha2_password",
-        ),
+        case Ok(response) { assert_msg(false, "expected unsupported plugin to fail") }
+        case Err(e) {
+            assert_eq_str(e.message(), "unsupported authentication plugin: caching_sha2_password")
+        }
     }
 }
 
 fun test_database_requires_handshake_capability() {
-    let handshake = Handshake {
+    let handshake = Handshake(
         capabilities: 1 | 4 | 512 | 8192 | 32768 | 524288,
         scramble: "12345678901234567890",
         plugin: "mysql_native_password",
         server_version: "8.0.43",
         connection_id: 1,
-    }
+    )
     match handshake_response(handshake, "raven", "secret", "ravendb") {
-        Ok(response) -> assert_msg(false, "expected missing database capability to fail"),
-        Err(e) -> assert_eq_str(
-            e.message(),
-            "server does not support selecting a database during handshake",
-        ),
+        case Ok(response) { assert_msg(false, "expected missing database capability to fail") }
+        case Err(e) {
+            assert_eq_str(e.message(), "server does not support selecting a database during handshake")
+        }
     }
 }
 
@@ -73,8 +71,8 @@ fun test_parse_protocol_41_error() {
     assert_eq_str(err.message(), "ERROR 1045 (28000): Access denied")
 }
 
-fun column_fixture() -> String {
-    let payload = lenenc_string("def")
+fun column_fixture() -> str {
+    var payload = lenenc_string("def")
     payload = payload.concat(lenenc_string("ravendb"))
     payload = payload.concat(lenenc_string("pets"))
     payload = payload.concat(lenenc_string("pets"))
@@ -88,80 +86,66 @@ fun column_fixture() -> String {
 
 fun test_parse_column_definition() {
     match parse_column(column_fixture()) {
-        Ok(column) -> {
+        case Ok(column) {
             assert_eq_str(column.name, "name")
             assert_eq_str(column.table, "pets")
             assert_eq_str(column.database, "ravendb")
             assert_eq_int(column.column_type, 253)
             assert_eq_int(column.charset, 45)
-        },
-        Err(e) -> assert_msg(false, e.message()),
+        }
+        case Err(e) { assert_msg(false, e.message()) }
     }
 }
 
 fun test_parse_text_row_with_null_and_empty_string() {
     let payload = lenenc_string("7").concat(byte(251)).concat(lenenc_string(""))
     match parse_text_row(payload, 3) {
-        Ok(row) -> {
+        case Ok(row) {
             assert_eq_str(row.get(0), "7")
-            assert_eq_int(
-                if row.is_null(1) {
-                    1
-                } else {
-                    0
-                },
-                1,
-            )
+            assert_eq_int(1 if row.is_null(1) else 0, 1)
             assert_eq_str(row.get(2), "")
-            assert_eq_int(
-                if row.is_null(2) {
-                    1
-                } else {
-                    0
-                },
-                0,
-            )
-        },
-        Err(e) -> assert_msg(false, e.message()),
+            assert_eq_int(1 if row.is_null(2) else 0, 0)
+        }
+        case Err(e) { assert_msg(false, e.message()) }
     }
 }
 
 fun test_parse_ok_packet_metadata() {
     let payload = byte(0).concat(byte(3)).concat(byte(42)).concat(int2_le(2)).concat(int2_le(1))
     match parse_ok(payload) {
-        Ok(result) -> {
+        case Ok(result) {
             assert_eq_int(result.affected, 3)
             assert_eq_int(result.last_insert_id, 42)
             assert_eq_int(result.warnings, 1)
-        },
-        Err(e) -> assert_msg(false, e.message()),
+        }
+        case Err(e) { assert_msg(false, e.message()) }
     }
 }
 
 fun test_malformed_length_encoded_values_return_errors() {
     match parse_ok(byte(0).concat(byte(252))) {
-        Ok(result) -> assert_msg(false, "expected truncated OK packet to fail"),
-        Err(e) -> assert_eq_str(e.message(), "truncated length-encoded integer"),
+        case Ok(result) { assert_msg(false, "expected truncated OK packet to fail") }
+        case Err(e) { assert_eq_str(e.message(), "truncated length-encoded integer") }
     }
 
     match parse_text_row(byte(253).concat(byte(1)), 1) {
-        Ok(row) -> assert_msg(false, "expected truncated row to fail"),
-        Err(e) -> assert_eq_str(e.message(), "truncated length-encoded integer"),
+        case Ok(row) { assert_msg(false, "expected truncated row to fail") }
+        case Err(e) { assert_eq_str(e.message(), "truncated length-encoded integer") }
     }
 }
 
-fun bind_or_fail(sql: String, params: List<Option<String>>) -> String {
+fun bind_or_fail(sql: str, params: list[Option[str]]) -> str {
     return match bind_sql_params(sql, params) {
-        Ok(bound) -> bound,
-        Err(e) -> {
+        case Ok(bound) { bound }
+        case Err(e) {
             assert_msg(false, e.message())
             ""
-        },
+        }
     }
 }
 
 fun test_bind_sql_params_encodes_values_as_hex() {
-    let params: List<Option<String>> = [Some("O'Brien"), Some("x; DROP TABLE users")]
+    let params: list[Option[str]] = [Some("O'Brien"), Some("x; DROP TABLE users")]
     assert_eq_str(
         bind_or_fail("SELECT * FROM users WHERE name = ? AND note = ?", params),
         "SELECT * FROM users WHERE name = _utf8mb4 X'4f27427269656e' AND note = _utf8mb4 X'783b2044524f50205441424c45207573657273'",
@@ -169,7 +153,7 @@ fun test_bind_sql_params_encodes_values_as_hex() {
 }
 
 fun test_bind_sql_params_skips_quotes_identifiers_and_comments() {
-    let params: List<Option<String>> = [Some("real")]
+    let params: list[Option[str]] = [Some("real")]
     let sql = "SELECT '?', \"?\", `?` /* ? */ -- ?\n# ?\nWHERE value = ?"
     assert_eq_str(
         bind_or_fail(sql, params),
@@ -178,7 +162,7 @@ fun test_bind_sql_params_skips_quotes_identifiers_and_comments() {
 }
 
 fun test_bind_sql_params_supports_null() {
-    let params: List<Option<String>> = [None, Some("")]
+    let params: list[Option[str]] = [None, Some("")]
     assert_eq_str(
         bind_or_fail("INSERT INTO t VALUES (?, ?)", params),
         "INSERT INTO t VALUES (NULL, _utf8mb4 X'')",
@@ -186,35 +170,34 @@ fun test_bind_sql_params_supports_null() {
 }
 
 fun test_bind_sql_params_rejects_wrong_arity() {
-    let empty: List<Option<String>> = []
+    let empty: list[Option[str]] = []
     match bind_sql_params("SELECT ?", empty) {
-        Ok(sql) -> assert_msg(false, "expected too-few-parameters error"),
-        Err(e) -> assert_eq_str(e.message(), "not enough parameters for SQL placeholders"),
+        case Ok(sql) { assert_msg(false, "expected too-few-parameters error") }
+        case Err(e) { assert_eq_str(e.message(), "not enough parameters for SQL placeholders") }
     }
 
-    let one: List<Option<String>> = [Some("extra")]
+    let one: list[Option[str]] = [Some("extra")]
     match bind_sql_params("SELECT 1", one) {
-        Ok(sql) -> assert_msg(false, "expected too-many-parameters error"),
-        Err(e) -> assert_eq_str(e.message(), "too many parameters for SQL placeholders"),
+        case Ok(sql) { assert_msg(false, "expected too-many-parameters error") }
+        case Err(e) { assert_eq_str(e.message(), "too many parameters for SQL placeholders") }
     }
 }
 
 fun test_bind_sql_params_supports_both_backslash_modes() {
-    let params: List<Option<String>> = [Some("bound")]
+    let params: list[Option[str]] = [Some("bound")]
     assert_eq_str(
         bind_or_fail("SELECT 'it\\'s ?', ?", params),
         "SELECT 'it\\'s ?', _utf8mb4 X'626f756e64'",
     )
     match bind_sql_params("SELECT 'backslash\\', ?", params) {
-        Ok(sql) -> assert_msg(
-            false,
-            "default quote rules unexpectedly matched NO_BACKSLASH_ESCAPES",
-        ),
-        Err(e) -> assert_eq_str(e.message(), "too many parameters for SQL placeholders"),
+        case Ok(sql) {
+            assert_msg(false, "default quote rules unexpectedly matched NO_BACKSLASH_ESCAPES")
+        }
+        case Err(e) { assert_eq_str(e.message(), "too many parameters for SQL placeholders") }
     }
     match bind_sql_params_no_backslash_escapes("SELECT 'backslash\\', ?", params) {
-        Ok(sql) -> assert_eq_str(sql, "SELECT 'backslash\\', _utf8mb4 X'626f756e64'"),
-        Err(e) -> assert_msg(false, e.message()),
+        case Ok(sql) { assert_eq_str(sql, "SELECT 'backslash\\', _utf8mb4 X'626f756e64'") }
+        case Err(e) { assert_msg(false, e.message()) }
     }
 }
 
@@ -223,18 +206,18 @@ fun test_authentication_switch_validation() {
         "12345678901234567890",
     ).concat(byte(0))
     match parse_auth_switch(valid) {
-        Ok(auth) -> {
+        case Ok(auth) {
             assert_eq_str(auth.plugin, "mysql_native_password")
             assert_eq_str(auth.scramble, "12345678901234567890")
-        },
-        Err(e) -> assert_msg(false, e.message()),
+        }
+        case Err(e) { assert_msg(false, e.message()) }
     }
     match parse_auth_switch(byte(254).concat("unterminated")) {
-        Ok(auth) -> assert_msg(false, "unterminated plugin unexpectedly parsed"),
-        Err(e) -> assert_eq_str(e.message(), "malformed authentication switch request"),
+        case Ok(auth) { assert_msg(false, "unterminated plugin unexpectedly parsed") }
+        case Err(e) { assert_eq_str(e.message(), "malformed authentication switch request") }
     }
     match parse_auth_switch(byte(254).concat("mysql_native_password").concat(byte(0))) {
-        Ok(auth) -> assert_msg(false, "missing scramble unexpectedly parsed"),
-        Err(e) -> assert_eq_str(e.message(), "authentication switch request has no scramble"),
+        case Ok(auth) { assert_msg(false, "missing scramble unexpectedly parsed") }
+        case Err(e) { assert_eq_str(e.message(), "authentication switch request has no scramble") }
     }
 }

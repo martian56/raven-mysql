@@ -1,61 +1,61 @@
 // Low-level byte and authentication helpers for the MySQL wire protocol.
 
-import std/string
-import std/net { TcpStream }
-import std/error { error_kind }
+import std.string
+from std.net import TcpStream
+from std.error import error_kind
 
-const MAX_PACKET_PAYLOAD: Int = 16777215
-const MAX_LOGICAL_PACKET: Int = 268435456
+let MAX_PACKET_PAYLOAD: int = 16777215
+let MAX_LOGICAL_PACKET: int = 268435456
 
-struct Packet {
-    sequence: Int,
-    payload: String,
+class Packet {
+    sequence: int
+    payload: str
 }
 
-struct LenEnc {
-    value: Int,
-    next: Int,
-    is_null: Bool,
+class LenEnc {
+    value: int
+    next: int
+    is_null: bool
 }
 
-fun byte(n: Int) -> String {
+fun byte(n: int) -> str {
     return __str_from_byte(n & 255)
 }
 
-fun byte_at(data: String, offset: Int) -> Int {
+fun byte_at(data: str, offset: int) -> int {
     return __str_byte_at(data, offset)
 }
 
-fun int2_le(n: Int) -> String {
+fun int2_le(n: int) -> str {
     return byte(n).concat(byte(n >> 8))
 }
 
-fun int3_le(n: Int) -> String {
+fun int3_le(n: int) -> str {
     return byte(n).concat(byte(n >> 8)).concat(byte(n >> 16))
 }
 
-fun int4_le(n: Int) -> String {
+fun int4_le(n: int) -> str {
     return byte(n).concat(byte(n >> 8)).concat(byte(n >> 16)).concat(byte(n >> 24))
 }
 
-fun read_int2_le(data: String, offset: Int) -> Int {
+fun read_int2_le(data: str, offset: int) -> int {
     return byte_at(data, offset) | (byte_at(data, offset + 1) << 8)
 }
 
-fun read_int3_le(data: String, offset: Int) -> Int {
+fun read_int3_le(data: str, offset: int) -> int {
     return byte_at(data, offset) | (byte_at(data, offset + 1) << 8) | (byte_at(data, offset + 2) << 16)
 }
 
-fun read_int4_le(data: String, offset: Int) -> Int {
+fun read_int4_le(data: str, offset: int) -> int {
     return byte_at(data, offset) | (byte_at(data, offset + 1) << 8) | (byte_at(data, offset + 2) << 16) | (byte_at(
         data,
         offset + 3,
     ) << 24)
 }
 
-fun int8_le(n: Int) -> String {
-    let out = ""
-    let shift = 0
+fun int8_le(n: int) -> str {
+    var out = ""
+    var shift = 0
     while shift < 64 {
         out = out.concat(byte(n >> shift))
         shift = shift + 8
@@ -63,9 +63,9 @@ fun int8_le(n: Int) -> String {
     return out
 }
 
-fun read_int8_le(data: String, offset: Int) -> Int {
-    let out = 0
-    let i = 0
+fun read_int8_le(data: str, offset: int) -> int {
+    var out = 0
+    var i = 0
     while i < 8 {
         out = out | (byte_at(data, offset + i) << (i * 8))
         i = i + 1
@@ -73,7 +73,7 @@ fun read_int8_le(data: String, offset: Int) -> Int {
     return out
 }
 
-fun lenenc_int(n: Int) -> String {
+fun lenenc_int(n: int) -> str {
     if n < 251 {
         return byte(n)
     }
@@ -86,33 +86,33 @@ fun lenenc_int(n: Int) -> String {
     return byte(254).concat(int8_le(n))
 }
 
-fun lenenc_string(value: String) -> String {
+fun lenenc_string(value: str) -> str {
     return lenenc_int(value.length()).concat(value)
 }
 
-fun read_lenenc(data: String, offset: Int) -> LenEnc {
+fun read_lenenc(data: str, offset: int) -> LenEnc {
     let first = byte_at(data, offset)
     if first < 251 {
-        return LenEnc { value: first, next: offset + 1, is_null: false }
+        return LenEnc(value: first, next: offset + 1, is_null: false)
     }
     if first == 251 {
-        return LenEnc { value: 0, next: offset + 1, is_null: true }
+        return LenEnc(value: 0, next: offset + 1, is_null: true)
     }
     if first == 252 {
-        return LenEnc { value: read_int2_le(data, offset + 1), next: offset + 3, is_null: false }
+        return LenEnc(value: read_int2_le(data, offset + 1), next: offset + 3, is_null: false)
     }
     if first == 253 {
-        return LenEnc { value: read_int3_le(data, offset + 1), next: offset + 4, is_null: false }
+        return LenEnc(value: read_int3_le(data, offset + 1), next: offset + 4, is_null: false)
     }
-    return LenEnc { value: read_int8_le(data, offset + 1), next: offset + 9, is_null: false }
+    return LenEnc(value: read_int8_le(data, offset + 1), next: offset + 9, is_null: false)
 }
 
-fun frame_packet(payload: String, sequence: Int) -> String {
+fun frame_packet(payload: str, sequence: int) -> str {
     return int3_le(payload.length()).concat(byte(sequence)).concat(payload)
 }
 
-fun read_exact(stream: TcpStream, count: Int) -> Result<String, Error> {
-    let out = ""
+fun read_exact(stream: TcpStream, count: int) -> Result[str, Error] {
+    var out = ""
     while out.length() < count {
         let part = stream.read(count - out.length())?
         if part.length() == 0 {
@@ -127,16 +127,16 @@ fun read_exact(stream: TcpStream, count: Int) -> Result<String, Error> {
 // packets are joined so callers always see one complete protocol message. A
 // non-negative `first_sequence` validates the first physical packet as well as
 // every continuation packet.
-fun read_packet_from(stream: TcpStream, first_sequence: Int) -> Result<Packet, Error> {
-    let payload = ""
-    let sequence = 0
-    let expected_sequence = first_sequence
-    let more = true
+fun read_packet_from(stream: TcpStream, first_sequence: int) -> Result[Packet, Error] {
+    var payload = ""
+    var sequence = 0
+    var expected_sequence = first_sequence
+    var more = true
     while more {
         let header = read_exact(stream, 4)?
         let length = read_int3_le(header, 0)
         sequence = byte_at(header, 3)
-        if expected_sequence >= 0 && sequence != expected_sequence {
+        if expected_sequence >= 0 and sequence != expected_sequence {
             return Err(
                 error_kind(
                     "mysql",
@@ -153,15 +153,15 @@ fun read_packet_from(stream: TcpStream, first_sequence: Int) -> Result<Packet, E
         }
         more = length == MAX_PACKET_PAYLOAD
     }
-    return Ok(Packet { sequence, payload })
+    return Ok(Packet(sequence: sequence, payload: payload))
 }
 
-fun read_packet(stream: TcpStream) -> Result<Packet, Error> {
+fun read_packet(stream: TcpStream) -> Result[Packet, Error] {
     return read_packet_from(stream, -1)
 }
 
-fun write_all(stream: TcpStream, data: String) -> Result<Int, Error> {
-    let written = 0
+fun write_all(stream: TcpStream, data: str) -> Result[int, Error] {
+    var written = 0
     while written < data.length() {
         let count = stream.write(data.substring(written, data.length()))?
         if count <= 0 {
@@ -174,9 +174,9 @@ fun write_all(stream: TcpStream, data: String) -> Result<Int, Error> {
 
 // Write one logical packet and return the next sequence number. An exact
 // multiple of the maximum payload is terminated by the protocol's empty packet.
-fun write_packet(stream: TcpStream, payload: String, sequence: Int) -> Result<Int, Error> {
-    let offset = 0
-    let seq = sequence
+fun write_packet(stream: TcpStream, payload: str, sequence: int) -> Result[int, Error] {
+    var offset = 0
+    var seq = sequence
     while payload.length() - offset >= MAX_PACKET_PAYLOAD {
         let chunk = payload.substring(offset, offset + MAX_PACKET_PAYLOAD)
         let _ = write_all(stream, frame_packet(chunk, seq))?
@@ -188,31 +188,31 @@ fun write_packet(stream: TcpStream, payload: String, sequence: Int) -> Result<In
     return Ok((seq + 1) & 255)
 }
 
-fun xor_bytes(left: String, right: String) -> String {
-    let out = ""
-    let i = 0
+fun xor_bytes(left: str, right: str) -> str {
+    var out = ""
+    var i = 0
     let n = left.length()
-    while i < n && i < right.length() {
+    while i < n and i < right.length() {
         out = out.concat(byte(byte_at(left, i) ^ byte_at(right, i)))
         i = i + 1
     }
     return out
 }
 
-fun u32(n: Int) -> Int {
+fun u32(n: int) -> int {
     return n & 4294967295
 }
 
-fun rotate_left_32(n: Int, bits: Int) -> Int {
+fun rotate_left_32(n: int, bits: int) -> int {
     let value = u32(n)
     return u32((value << bits) | (value >> (32 - bits)))
 }
 
-fun int4_be(n: Int) -> String {
+fun int4_be(n: int) -> str {
     return byte(n >> 24).concat(byte(n >> 16)).concat(byte(n >> 8)).concat(byte(n))
 }
 
-fun read_int4_be(data: String, offset: Int) -> Int {
+fun read_int4_be(data: str, offset: int) -> int {
     return (byte_at(data, offset) << 24) | (byte_at(data, offset + 1) << 16) | (byte_at(
         data,
         offset + 2,
@@ -222,9 +222,9 @@ fun read_int4_be(data: String, offset: Int) -> Int {
 // SHA-1 is required by MySQL's mysql_native_password challenge-response
 // authentication. It is kept private to the protocol implementation rather
 // than exposed as a general-purpose cryptographic API.
-fun sha1(data: String) -> String {
-    let padded: List<Int> = []
-    let i = 0
+fun sha1(data: str) -> str {
+    let padded: list[int] = []
+    var i = 0
     while i < data.length() {
         padded.push(byte_at(data, i))
         i = i + 1
@@ -246,16 +246,16 @@ fun sha1(data: String) -> String {
     padded.push((bit_len >> 8) & 255)
     padded.push(bit_len & 255)
 
-    let h0 = 1732584193
-    let h1 = 4023233417
-    let h2 = 2562383102
-    let h3 = 271733878
-    let h4 = 3285377520
+    var h0 = 1732584193
+    var h1 = 4023233417
+    var h2 = 2562383102
+    var h3 = 271733878
+    var h4 = 3285377520
 
-    let chunk = 0
+    var chunk = 0
     while chunk < padded.len() {
-        let words: List<Int> = []
-        let wi = 0
+        let words: list[int] = []
+        var wi = 0
         while wi < 80 {
             words.push(0)
             wi = wi + 1
@@ -272,15 +272,15 @@ fun sha1(data: String) -> String {
             wi = wi + 1
         }
 
-        let a = h0
-        let b = h1
-        let c = h2
-        let d = h3
-        let e = h4
-        let round = 0
+        var a = h0
+        var b = h1
+        var c = h2
+        var d = h3
+        var e = h4
+        var round = 0
         while round < 80 {
-            let f = 0
-            let k = 0
+            var f = 0
+            var k = 0
             if round < 20 {
                 f = (b & c) | ((u32(b) ^ 4294967295) & d)
                 k = 1518500249
@@ -316,7 +316,7 @@ fun sha1(data: String) -> String {
     )
 }
 
-fun native_password_token(password: String, scramble: String) -> String {
+fun native_password_token(password: str, scramble: str) -> str {
     if password.length() == 0 {
         return ""
     }
@@ -325,12 +325,12 @@ fun native_password_token(password: String, scramble: String) -> String {
     return xor_bytes(stage1, sha1(scramble.concat(stage2)))
 }
 
-fun hex(data: String) -> String {
-    const DIGITS: String = "0123456789abcdef"
-    let chunks: List<String> = []
-    let chunk = ""
-    let chunk_bytes = 0
-    let i = 0
+fun hex(data: str) -> str {
+    let DIGITS: str = "0123456789abcdef"
+    var chunks: list[str] = []
+    var chunk = ""
+    var chunk_bytes = 0
+    var i = 0
     while i < data.length() {
         let value = byte_at(data, i)
         chunk = chunk.concat(DIGITS.substring(value >> 4, (value >> 4) + 1))
@@ -353,7 +353,7 @@ fun hex(data: String) -> String {
     // Join chunks as a tree rather than repeatedly copying the entire prefix.
     // This keeps large bound values near O(n log n) instead of O(n²).
     while chunks.len() > 1 {
-        let merged: List<String> = []
+        let merged: list[str] = []
         i = 0
         while i < chunks.len() {
             if i + 1 < chunks.len() {

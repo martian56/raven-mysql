@@ -4,22 +4,22 @@
 //   raven build examples/basic.rv -o target/basic
 //   ./target/basic
 
-import std/io { println }
-import "../lib" { connect, Connection }
+from std.io import println
+from "../lib" import connect, Connection
 
-const HOST: String = "127.0.0.1"
-const PORT: Int = 33306
-const USER: String = "raven"
-const PASSWORD: String = "ravenpw"
-const DATABASE: String = "ravendb"
+let HOST: str = "127.0.0.1"
+let PORT: int = 33306
+let USER: str = "raven"
+let PASSWORD: str = "ravenpw"
+let DATABASE: str = "ravendb"
 
 fun main() {
     match connect(HOST, PORT, USER, PASSWORD, DATABASE) {
-        Ok(conn) -> {
+        case Ok(conn) {
             run_example(conn)
             conn.close()
-        },
-        Err(e) -> println("connect failed: ${e.message()}"),
+        }
+        case Err(e) { println("connect failed: ${e.message()}") }
     }
 }
 
@@ -33,29 +33,25 @@ fun run_example(conn: Connection) {
         "INSERT INTO raven_mysql_example (name, note) VALUES (?, ?)",
         ["O'Brien", "bound safely"],
     ) {
-        Ok(count) -> println("inserted ${count} row"),
-        Err(e) -> println("insert failed: ${e.message()}"),
+        case Ok(count) { println("inserted ${count} row") }
+        case Err(e) { println("insert failed: ${e.message()}") }
     }
 
-    let optional: List<Option<String>> = [Some("Raven"), None]
+    let optional: list[Option[str]] = [Some("Raven"), None]
     let _ = conn.execute_optional_params(
         "INSERT INTO raven_mysql_example (name, note) VALUES (?, ?)",
         optional,
     )
 
     match conn.query("SELECT id, name, note FROM raven_mysql_example ORDER BY id") {
-        Ok(result) -> {
+        case Ok(result) {
             println("${result.columns[0]} | ${result.columns[1]} | ${result.columns[2]}")
             for row in result.rows {
-                let note = if row.is_null(2) {
-                    "NULL"
-                } else {
-                    row.get(2)
-                }
+                let note = "NULL" if row.is_null(2) else row.get(2)
                 println("${row.get(0)} | ${row.get(1)} | ${note}")
             }
-        },
-        Err(e) -> println("select failed: ${e.message()}"),
+        }
+        case Err(e) { println("select failed: ${e.message()}") }
     }
 
     let _ = conn.execute("DROP TABLE raven_mysql_example")

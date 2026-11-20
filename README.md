@@ -50,12 +50,12 @@ Add this to `rv.toml`:
 ## Quick start
 
 ```rust
-import std/io { println }
-import "github.com/martian56/raven-mysql" { connect }
+from std.io import println
+from "github.com/martian56/raven-mysql" import connect
 
 fun main() {
     match connect("127.0.0.1", 3306, "raven", "ravenpw", "ravendb") {
-        Ok(conn) -> {
+        case Ok(conn) {
             let _ = conn.execute(
                 "CREATE TABLE IF NOT EXISTS pets (id BIGINT AUTO_INCREMENT PRIMARY KEY, name TEXT)",
             )
@@ -64,16 +64,16 @@ fun main() {
             let _ = conn.execute_params("INSERT INTO pets (name) VALUES (?)", ["O'Brien"])
 
             match conn.query("SELECT id, name FROM pets ORDER BY id") {
-                Ok(result) -> {
+                case Ok(result) {
                     for row in result.rows {
                         println("${row.get(0)}: ${row.get(1)}")
                     }
-                },
-                Err(e) -> println("query failed: ${e.message()}"),
+                }
+                case Err(e) { println("query failed: ${e.message()}") }
             }
             conn.close()
-        },
-        Err(e) -> println("connect failed: ${e.message()}"),
+        }
+        case Err(e) { println("connect failed: ${e.message()}") }
     }
 }
 ```
@@ -85,8 +85,8 @@ See [`examples/basic.rv`](examples/basic.rv) for a complete runnable example.
 ### Connecting
 
 ```rust
-connect(host, port, user, password, database) -> Result<Connection, Error>
-connect_with_timeout(host, port, user, password, database, timeout_ms) -> Result<Connection, Error>
+connect(host, port, user, password, database) -> Result[Connection, Error]
+connect_with_timeout(host, port, user, password, database, timeout_ms) -> Result[Connection, Error]
 ```
 
 `connect` applies a 30-second read and write timeout. Use
@@ -105,18 +105,18 @@ stream.
 
 ### Queries and writes
 
-- `query(sql) -> Result<QueryResult, Error>` runs any SQL statement and returns
+- `query(sql) -> Result[QueryResult, Error]` runs any SQL statement and returns
   its complete response.
-- `execute(sql) -> Result<Int, Error>` runs SQL and returns the affected-row
+- `execute(sql) -> Result[int, Error]` runs SQL and returns the affected-row
   count.
 - `query_params(sql, params)` and `execute_params(sql, params)` bind a
-  `List<String>` to `?` placeholders.
+  `list[str]` to `?` placeholders.
 - `query_optional_params(sql, params)` and `execute_optional_params(sql,
   params)` accept `List<Option<String>>`; `None` binds SQL `NULL`.
 - The corresponding `*_no_backslash_escapes` methods scan SQL source using
   `NO_BACKSLASH_ESCAPES` quote rules.
-- `ping() -> Result<Bool, Error>` sends `COM_PING`.
-- `select_database(name) -> Result<Bool, Error>` sends `COM_INIT_DB`.
+- `ping() -> Result[bool, Error]` sends `COM_PING`.
+- `select_database(name) -> Result[bool, Error]` sends `COM_INIT_DB`.
 - `set_timeout_ms(ms)` changes the read and write timeout for later commands.
 - `close()` closes the connection.
 
@@ -125,12 +125,9 @@ stream.
 Use parameters for every value that is not a fixed part of the SQL:
 
 ```rust
-let _ = conn.execute_params(
-    "INSERT INTO users (name, city) VALUES (?, ?)",
-    [user_name, city],
-)?
+let _ = conn.execute_params("INSERT INTO users (name, city) VALUES (?, ?)", [user_name, city])?
 
-let nullable: List<Option<String>> = [Some(user_name), None]
+let nullable: list[Option[str]] = [Some(user_name), None]
 let _ = conn.execute_optional_params(
     "INSERT INTO profiles (name, biography) VALUES (?, ?)",
     nullable,
@@ -159,13 +156,13 @@ before a quote; bound values remain safe hexadecimal literals in either mode.
 
 `QueryResult` contains:
 
-- `columns: List<String>`: column labels in result order.
-- `fields: List<Column>`: detailed metadata for each result column.
-- `rows: List<Row>`: all rows collected in memory.
-- `affected: Int`: rows changed by a write statement.
-- `last_insert_id: Int`: first generated ID from the statement.
-- `warnings: Int`: warning count reported by the server.
-- `row_count() -> Int`: number of returned rows.
+- `columns: list[str]`: column labels in result order.
+- `fields: list[Column]`: detailed metadata for each result column.
+- `rows: list[Row]`: all rows collected in memory.
+- `affected: int`: rows changed by a write statement.
+- `last_insert_id: int`: first generated ID from the statement.
+- `warnings: int`: warning count reported by the server.
+- `row_count() -> int`: number of returned rows.
 
 `Column` contains `name`, `table`, `database`, `column_type`, `flags`, and
 `charset`. `column_type` and `flags` are the numeric MySQL protocol values.
