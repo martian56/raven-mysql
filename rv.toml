@@ -1,6 +1,6 @@
 [package]
 name = "raven-mysql"
 version = "0.2.0"
-edition = "v2"
+edition = "v3"
 
 [dependencies]
