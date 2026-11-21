@@ -1,5 +1,5 @@
-import std/test { assert_eq_int, assert_eq_str }
-import "./protocol" { byte, byte_at, frame_packet, hex, int2_le, int3_le, int4_le, lenenc_int, lenenc_string, native_password_token, read_int2_le, read_int3_le, read_int4_le, read_lenenc, sha1 }
+from std.test import assert_eq_int, assert_eq_str
+from "./protocol" import byte, byte_at, frame_packet, hex, int2_le, int3_le, int4_le, lenenc_int, lenenc_string, native_password_token, read_int2_le, read_int3_le, read_int4_le, read_lenenc, sha1
 
 fun test_little_endian_integers_round_trip() {
     assert_eq_int(read_int2_le(int2_le(48879), 0), 48879)
@@ -45,14 +45,7 @@ fun test_length_encoded_integer_boundaries() {
 
 fun test_length_encoded_null_and_string() {
     let null_value = read_lenenc(byte(251), 0)
-    assert_eq_int(
-        if null_value.is_null {
-            1
-        } else {
-            0
-        },
-        1,
-    )
+    assert_eq_int(1 if null_value.is_null else 0, 1)
 
     let encoded = lenenc_string("hello")
     let length = read_lenenc(encoded, 0)

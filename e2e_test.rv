@@ -1,26 +1,26 @@
-import std/env { get_env_or, has_env }
-import std/string
-import std/test { assert_eq_int, assert_eq_str, assert_msg, assert_true }
-import "./lib" { connect, Connection }
+from std.env import get_env_or, has_env
+import std.string
+from std.test import assert_eq_int, assert_eq_str, assert_msg, assert_true
+from "./lib" import connect, Connection
 
-fun e2e_enabled() -> Bool {
+fun e2e_enabled() -> bool {
     return has_env("RAVEN_MYSQL_E2E")
 }
 
-fun mysql_port() -> Int {
+fun mysql_port() -> int {
     return match get_env_or("RAVEN_MYSQL_PORT", "33306").parse_int() {
-        Some(port) -> port,
-        None -> 33306,
+        case Some(port) { port }
+        case None { 33306 }
     }
 }
 
-fun must<T>(result: Result<T, Error>) -> T {
+fun must[T](result: Result[T, Error]) -> T {
     return match result {
-        Ok(value) -> value,
-        Err(e) -> {
+        case Ok(value) { value }
+        case Err(e) {
             __panic(e.message())
             must(result)
-        },
+        }
     }
 }
 
@@ -36,8 +36,8 @@ fun open_test_db() -> Connection {
     )
 }
 
-fun repeated_text(value: String, target_length: Int) -> String {
-    let out = value
+fun repeated_text(value: str, target_length: int) -> str {
+    var out = value
     while out.length() < target_length {
         out = out.concat(out)
     }
@@ -45,7 +45,7 @@ fun repeated_text(value: String, target_length: Int) -> String {
 }
 
 fun test_e2e_connect_and_server_metadata() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
@@ -63,7 +63,7 @@ fun test_e2e_connect_and_server_metadata() {
 }
 
 fun test_e2e_empty_password_authentication() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = must(
@@ -80,7 +80,7 @@ fun test_e2e_empty_password_authentication() {
 }
 
 fun test_e2e_wrong_password_returns_mysql_error() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     match connect(
@@ -90,19 +90,19 @@ fun test_e2e_wrong_password_returns_mysql_error() {
         "definitely-wrong",
         get_env_or("RAVEN_MYSQL_DATABASE", "ravendb"),
     ) {
-        Ok(conn) -> {
+        case Ok(conn) {
             conn.close()
             assert_msg(false, "expected authentication to fail")
-        },
-        Err(e) -> {
+        }
+        case Err(e) {
             assert_eq_str(e.kind(), "mysql")
             assert_msg(e.message().contains("ERROR 1045"), e.message())
-        },
+        }
     }
 }
 
 fun test_e2e_unknown_database_returns_mysql_error() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     match connect(
@@ -112,19 +112,21 @@ fun test_e2e_unknown_database_returns_mysql_error() {
         get_env_or("RAVEN_MYSQL_PASSWORD", "ravenpw"),
         "raven_mysql_database_that_does_not_exist",
     ) {
-        Ok(conn) -> {
+        case Ok(conn) {
             conn.close()
             assert_msg(false, "expected database selection to fail")
-        },
-        Err(e) -> assert_msg(
-            e.message().contains("ERROR 1044") || e.message().contains("ERROR 1049"),
-            e.message(),
-        ),
+        }
+        case Err(e) {
+            assert_msg(
+                e.message().contains("ERROR 1044") or e.message().contains("ERROR 1049"),
+                e.message(),
+            )
+        }
     }
 }
 
 fun test_e2e_ping_and_database_selection() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
@@ -135,18 +137,20 @@ fun test_e2e_ping_and_database_selection() {
     )
     assert_eq_str(must(conn.query("SELECT DATABASE()")).rows[0].get(0), "ravendb")
     match conn.select_database("raven_mysql_database_that_does_not_exist") {
-        Ok(ok) -> assert_msg(false, "expected unknown database to fail"),
-        Err(e) -> assert_msg(
-            e.message().contains("ERROR 1044") || e.message().contains("ERROR 1049"),
-            e.message(),
-        ),
+        case Ok(ok) { assert_msg(false, "expected unknown database to fail") }
+        case Err(e) {
+            assert_msg(
+                e.message().contains("ERROR 1044") or e.message().contains("ERROR 1049"),
+                e.message(),
+            )
+        }
     }
     assert_msg(must(conn.ping()), "COM_PING after INIT_DB error returned false")
     conn.close()
 }
 
 fun test_e2e_create_insert_and_select_rows() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
@@ -174,7 +178,7 @@ fun test_e2e_create_insert_and_select_rows() {
 }
 
 fun test_e2e_parameters_cannot_change_sql_syntax() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
@@ -196,7 +200,7 @@ fun test_e2e_parameters_cannot_change_sql_syntax() {
 }
 
 fun test_e2e_null_and_empty_string_remain_distinct() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
@@ -206,7 +210,7 @@ fun test_e2e_null_and_empty_string_remain_distinct() {
             "CREATE TABLE raven_mysql_nulls (nullable_value TEXT NULL, empty_value TEXT NOT NULL)",
         ),
     )
-    let params: List<Option<String>> = [None, Some("")]
+    let params: list[Option[str]] = [None, Some("")]
     assert_eq_int(
         must(conn.execute_optional_params("INSERT INTO raven_mysql_nulls VALUES (?, ?)", params)),
         1,
@@ -214,23 +218,23 @@ fun test_e2e_null_and_empty_string_remain_distinct() {
     let result = must(conn.query("SELECT nullable_value, empty_value FROM raven_mysql_nulls"))
     assert_true(result.rows[0].is_null(0))
     assert_eq_str(result.rows[0].get(0), "")
-    assert_true(!result.rows[0].is_null(1))
+    assert_true(not result.rows[0].is_null(1))
     assert_eq_str(result.rows[0].get(1), "")
     let _ = must(conn.execute("DROP TABLE raven_mysql_nulls"))
     conn.close()
 }
 
 fun test_e2e_connection_recovers_after_sql_error() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
     match conn.query("SELECT * FROM raven_mysql_table_that_does_not_exist") {
-        Ok(result) -> assert_msg(false, "expected missing-table query to fail"),
-        Err(e) -> {
+        case Ok(result) { assert_msg(false, "expected missing-table query to fail") }
+        case Err(e) {
             assert_eq_str(e.kind(), "mysql")
             assert_true(e.message().contains("ERROR 1146"))
-        },
+        }
     }
     let result = must(conn.query("SELECT 42 AS answer"))
     assert_eq_str(result.rows[0].get(0), "42")
@@ -238,7 +242,7 @@ fun test_e2e_connection_recovers_after_sql_error() {
 }
 
 fun test_e2e_insert_id_and_affected_rows() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
@@ -261,7 +265,7 @@ fun test_e2e_insert_id_and_affected_rows() {
 }
 
 fun test_e2e_transaction_rollback() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
@@ -278,7 +282,7 @@ fun test_e2e_transaction_rollback() {
 }
 
 fun test_e2e_transaction_commit() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
@@ -293,7 +297,7 @@ fun test_e2e_transaction_commit() {
 }
 
 fun test_e2e_column_metadata_and_empty_result_set() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
@@ -318,7 +322,7 @@ fun test_e2e_column_metadata_and_empty_result_set() {
 }
 
 fun test_e2e_scalar_types_are_returned_as_text() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
@@ -335,7 +339,7 @@ fun test_e2e_scalar_types_are_returned_as_text() {
 }
 
 fun test_e2e_unicode_and_control_bytes_round_trip() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
@@ -355,7 +359,7 @@ fun test_e2e_unicode_and_control_bytes_round_trip() {
 }
 
 fun test_e2e_large_parameter_and_result_round_trip() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
@@ -371,7 +375,7 @@ fun test_e2e_large_parameter_and_result_round_trip() {
 }
 
 fun test_e2e_many_rows_preserve_order_and_boundaries() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
@@ -381,8 +385,8 @@ fun test_e2e_many_rows_preserve_order_and_boundaries() {
             "CREATE TABLE raven_mysql_many (id INT PRIMARY KEY, value VARCHAR(30) NOT NULL)",
         ),
     )
-    let sql = "INSERT INTO raven_mysql_many VALUES "
-    let i = 1
+    var sql = "INSERT INTO raven_mysql_many VALUES "
+    var i = 1
     while i <= 200 {
         if i > 1 {
             sql = sql.concat(",")
@@ -401,7 +405,7 @@ fun test_e2e_many_rows_preserve_order_and_boundaries() {
 }
 
 fun test_e2e_separate_connections_observe_committed_writes() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let writer = open_test_db()
@@ -419,7 +423,7 @@ fun test_e2e_separate_connections_observe_committed_writes() {
 }
 
 fun test_e2e_bound_values_ignore_session_escape_mode() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
@@ -437,7 +441,7 @@ fun test_e2e_bound_values_ignore_session_escape_mode() {
 }
 
 fun test_e2e_no_backslash_escape_sql_source_is_scanned_correctly() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
@@ -455,7 +459,7 @@ fun test_e2e_no_backslash_escape_sql_source_is_scanned_correctly() {
 }
 
 fun test_e2e_server_warning_count_is_reported() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
@@ -466,7 +470,7 @@ fun test_e2e_server_warning_count_is_reported() {
 }
 
 fun test_e2e_multi_packet_query_and_result() {
-    if !e2e_enabled() {
+    if not e2e_enabled() {
         return
     }
     let conn = open_test_db()
