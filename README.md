@@ -32,7 +32,7 @@ the MySQL client/server protocol over `std/net`; applications do not need
 
 ## Requirements
 
-- Raven 2.26.1 or newer.
+- Raven 3.0.0 or newer.
 - A MySQL user configured with `mysql_native_password`.
 
 The Docker test environment in this repository configures an appropriate user
