@@ -8,7 +8,7 @@ import std.net
 from std.net import TcpStream
 import std.string
 from std.error import error_kind
-from "./protocol" import byte, byte_at, hex, int4_le, LenEnc, native_password_token, read_int2_le, read_int4_le, read_lenenc, read_packet_from, write_packet
+from "./protocol" import byte, byte_at, hex, int4_le, LenEnc, native_password_token, read_int2_le, read_int4_le, read_greeting, read_lenenc, read_packet_from, write_packet
 
 let CLIENT_LONG_PASSWORD: int = 1
 let CLIENT_LONG_FLAG: int = 4
@@ -616,7 +616,7 @@ fun establish_connection(
     password: str,
     database: str,
 ) -> Result[Connection, Error] {
-    let greeting = read_packet_from(stream, 0)?
+    let greeting = read_greeting(stream)?
     let handshake = parse_handshake(greeting.payload)?
     let response = handshake_response(handshake, user, password, database)?
     let next_sequence = write_packet(stream, response, (greeting.sequence + 1) & 255)?

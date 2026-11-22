@@ -123,6 +123,24 @@ fun read_exact(stream: TcpStream, count: int) -> Result[str, Error] {
     return Ok(out)
 }
 
+// Read the server greeting, the first packet of a connection. Anything that
+// is not a small sequence-0 handshake (or error) packet means the port is not
+// a MySQL server, which deserves a plainer message than a framing error.
+fun read_greeting(stream: TcpStream) -> Result[Packet, Error] {
+    let header = read_exact(stream, 4)?
+    let length = read_int3_le(header, 0)
+    let sequence = byte_at(header, 3)
+    if sequence != 0 or length == 0 or length > 65536 {
+        return Err(error_kind("mysql", "the server did not answer as MySQL (is this the right host and port?)"))
+    }
+    let payload = read_exact(stream, length)?
+    let kind = byte_at(payload, 0)
+    if kind != 10 and kind != 255 {
+        return Err(error_kind("mysql", "the server did not answer as MySQL (is this the right host and port?)"))
+    }
+    return Ok(Packet(sequence: sequence, payload: payload))
+}
+
 // Read one logical packet. MySQL splits payloads at 16 MiB - 1; continuation
 // packets are joined so callers always see one complete protocol message. A
 // non-negative `first_sequence` validates the first physical packet as well as
