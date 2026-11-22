@@ -44,7 +44,7 @@ Add this to `rv.toml`:
 
 ```toml
 [dependencies]
-"github.com/martian56/raven-mysql" = "v0.3.0"
+"github.com/martian56/raven-mysql" = "v0.3.1"
 ```
 
 ## Quick start
